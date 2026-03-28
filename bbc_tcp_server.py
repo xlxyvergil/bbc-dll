@@ -14,7 +14,8 @@ TCP_PORT = 25001
 
 # 客户端连接列表
 _tcp_clients = []
-_tcp_clients_lock = None
+import threading
+_tcp_clients_lock = threading.Lock()
 
 # 弹窗等待响应
 _popup_wait_dict = {}
@@ -82,11 +83,10 @@ def start_tcp_server(bb_window, port=25001):
     
     global CT, Battle, Windows, LDdevice, Mumudevice
     global tcp_server_instance, popup_event_queue, original_messagebox
-    global _popup_wait_lock, _tcp_clients_lock
+    global _popup_wait_lock
     
     popup_event_queue = queue.Queue()
     _popup_wait_lock = threading.Lock()
-    _tcp_clients_lock = threading.Lock()
     
     # 先设置弹窗拦截（最重要）
     # 模块导入延迟到免责声明处理完之后
@@ -101,7 +101,7 @@ def start_tcp_server(bb_window, port=25001):
         'askretrycancel': messagebox.askretrycancel
     }
     
-    CONTROLLED_POPUPS = ["免责声明", "助战排序不符合", "队伍配置错误", "自动连接失败"]
+    CONTROLLED_POPUPS = ["免责声明", "助战排序不符合", "队伍配置错误", "自动连接失败", "脚本停止！", "正在结束任务！"]
     
     def create_popup_wrapper(func_name, original_func):
         def wrapper(title, message, **kwargs):
@@ -157,17 +157,7 @@ def start_tcp_server(bb_window, port=25001):
         popup_data = {'value': None, 'resolved': False}
         
         def monitor():
-            if "免责声明" in title:
-                time.sleep(2.0)
-                popup_data['value'] = 'ok'
-                popup_data['resolved'] = True
-                hwnd = user32.FindWindowW(None, title)
-                if hwnd:
-                    user32.PostMessageW(hwnd, WM_CLOSE, 0, 0)
-                # 免责声明关闭后，立即导入模块
-                log_to_file("[Auto] 免责声明已关闭，开始导入模块")
-                ensure_imports()
-                return
+            # 免责声明也走外部决策流程，不再自动关闭
             
             while not popup_data['resolved']:
                 with _popup_wait_lock:
@@ -175,11 +165,40 @@ def start_tcp_server(bb_window, port=25001):
                     if info and info.get('status') == 'resolved':
                         popup_data['value'] = info.get('result')
                         popup_data['resolved'] = True
+                        # 关闭弹窗窗口
                         hwnd = user32.FindWindowW(None, title)
                         if hwnd:
                             user32.PostMessageW(hwnd, WM_CLOSE, 0, 0)
+                            log_to_file(f"[Popup] 发送关闭消息: {title}")
                         break
                 time.sleep(0.1)
+            
+            # 等待弹窗实际关闭（最多3秒）
+            for _ in range(30):
+                hwnd = user32.FindWindowW(None, title)
+                if not hwnd:
+                    # 弹窗已关闭
+                    log_to_file(f"[Popup] 弹窗已确认关闭: {title}")
+                    break
+                time.sleep(0.1)
+            
+            # 从队列移除
+            _remove_popup_from_queue(popup_id)
+            
+            # 推送弹窗已关闭的信息给所有客户端
+            close_notify = {
+                'type': 'popup_closed',
+                'id': popup_id,
+                'title': title,
+                'result': popup_data['value']
+            }
+            _broadcast_to_clients(close_notify)
+            log_to_file(f"[TCP] 弹窗关闭通知已广播: {popup_id}")
+            
+            # 免责声明关闭后，导入模块
+            if "免责声明" in title:
+                log_to_file("[Auto] 免责声明已关闭，开始导入模块")
+                ensure_imports()
         
         t = threading.Thread(target=monitor, daemon=True)
         t.start()
