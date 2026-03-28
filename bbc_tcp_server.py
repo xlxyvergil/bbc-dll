@@ -396,6 +396,13 @@ def start_tcp_server(bb_window, port=25001):
                 
                 return {'success': True, 'popups': popups}
             
+            elif command == 'load_config':
+                filename = args.get('filename', '')
+                if not filename:
+                    return {'success': False, 'error': 'filename required'}
+                result = api_load_config(_bb_window_global, filename)
+                return {'success': result}
+            
             elif command == 'popup_response':
                 popup_id = args.get('id', '')
                 action = args.get('action', '')
@@ -511,6 +518,53 @@ def api_set_battle_type(page, battle_type):
         page.battletype.set(CT.BATTLE_TYPE[0])
     elif battle_type == "single":
         page.battletype.set(CT.BATTLE_TYPE[1])
+
+def api_load_config(bb, filename):
+    """加载队伍配置文件（从第4步开始：直接应用配置）"""
+    import os
+    import json
+    
+    try:
+        page = bb.pages[0]
+        
+        # 1. 构建文件路径
+        config_path = os.path.join("settings", filename)
+        if not os.path.exists(config_path):
+            log_to_file(f"[LoadConfig] 配置文件不存在: {config_path}")
+            return False
+        
+        # 2. 读取配置
+        with open(config_path, "r", encoding="utf8") as fp:
+            SS = json.load(fp)
+        
+        # 3. 保留当前连接信息
+        SS["connectMode"] = page.SS.get("connectMode", None)
+        SS["snapshotDevice"] = page.SS.get("snapshotDevice", None)
+        SS["operateDevice"] = page.SS.get("operateDevice", None)
+        
+        # 4. 应用配置
+        page.SS = SS
+        
+        # 5. 重置页面
+        while True:
+            try:
+                page.reset()
+                break
+            except Exception as e:
+                log_to_file(f"[LoadConfig] reset error: {e}, retry...")
+                import traceback
+                traceback.print_exc()
+        
+        # 6. 保存配置
+        bb.saveJsons()
+        
+        log_to_file(f"[LoadConfig] 配置已加载: {filename}")
+        return True
+    except Exception as e:
+        log_to_file(f"[LoadConfig] Error: {e}")
+        import traceback
+        traceback.print_exc()
+        return False
 
 def api_start_battle(page):
     """开始战斗"""
