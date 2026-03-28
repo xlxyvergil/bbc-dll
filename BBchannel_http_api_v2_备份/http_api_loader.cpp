@@ -166,7 +166,7 @@ void InitPython() {
             "    try:\n"
             "        # 立即启动 HTTP Server（在免责声明弹窗之前）\n"
             "        import http_api_server\n"
-            "        http_api_server.start_http_server(None, 5000)\n"
+            "        http_api_server.start_http_server(None, 25002)\n"
             "        print('[HTTP API] Server started early')\n"
             "        \n"
             "        # 等待 BBchannelWindow 实例创建\n"

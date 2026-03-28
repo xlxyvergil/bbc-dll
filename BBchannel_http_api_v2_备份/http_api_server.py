@@ -1,10 +1,18 @@
 # ==================== HTTP API Server ====================
 http_server_instance = None
+tcp_server_instance = None  # TCP Server 实例
 popup_event_queue = None
 original_messagebox = None
 CT = None  # 全局 CT 变量
 Battle = None  # 全局 Battle 类
 _bb_window_global = None  # 全局 bb_window 引用
+
+# 配置
+HTTP_PORT = 25002  # HTTP Server 端口
+TCP_PORT = 25001  # TCP Server 端口
+
+# TCP 广播函数（由 TCP Server 设置）
+_broadcast_popup = None
 
 # 弹窗等待响应的字典：popup_id -> {result: str, callback: func}
 # 用于异步等待外部系统返回弹窗决策
@@ -18,8 +26,33 @@ def update_bb_window(bb_window):
     _bb_window_global = bb_window
     log_to_file(f"[HTTP-Server] bb_window updated: {bb_window}")
 
-def start_http_server(bb_window, port=16888):
-    """启动 HTTP API 服务器，用于外部控制"""
+def _remove_popup_from_queue(popup_id):
+    """从队列中移除指定弹窗"""
+    global popup_event_queue
+    if popup_event_queue is None:
+        return
+    
+    temp_list = []
+    removed = False
+    while not popup_event_queue.empty():
+        try:
+            p = popup_event_queue.get_nowait()
+            if p['id'] == popup_id:
+                removed = True
+                log_to_file(f"[Popup] 已从队列移除弹窗: {popup_id}")
+            else:
+                temp_list.append(p)
+        except:
+            break
+    
+    # 将其他弹窗放回队列
+    for p in temp_list:
+        popup_event_queue.put(p)
+    
+    return removed
+
+def start_http_server(bb_window, port=25002):
+    """启动 HTTP API 服务器，用于外部控制（独立运行，不随战斗线程停止）"""
     from http.server import HTTPServer, BaseHTTPRequestHandler
     import json
     import threading
@@ -87,68 +120,172 @@ def start_http_server(bb_window, port=16888):
     
     def create_popup_wrapper(func_name, original_func):
         """
-        创建弹窗包装器
-        只拦截指定的3个弹窗，其他弹窗正常显示
+        创建弹窗包装器 - 最终方案：
+        1. 弹窗正常显示（用户可见）
+        2. 拦截弹窗返回值（不直接返回给 BBC）
+        3. 通知外部系统弹窗信息
+        4. 外部系统决定应该返回什么值给 BBC
+        5. 关闭弹窗，返回外部决定的值
         """
         def wrapper(title, message, **kwargs):
             # 检查是否需要外部控制
             is_controlled = any(keyword in title for keyword in CONTROLLED_POPUPS)
             
             if not is_controlled:
-                # 非控制弹窗，正常显示
+                # 非控制弹窗，正常显示并返回
                 return original_func(title, message, **kwargs)
             
-            # 免责声明自动返回 ok，不阻塞
-            if "免责声明" in title:
-                log_to_file(f"[Popup] 免责声明自动返回 ok: {title}")
-                return None
+            # 免责声明也走外部控制流程（弹窗显示但立即关闭）
+            # 外部系统可以决定返回什么值，默认返回 ok
             
-            # 其他控制弹窗，拦截并等待外部决策
+            # 生成唯一弹窗 ID
             popup_id = str(time.time())
-            wait_event = threading.Event()
             
+            # 存储弹窗信息
             with _popup_wait_lock:
                 _popup_wait_dict[popup_id] = {
-                    'event': wait_event,
-                    'result': None,
+                    'result': None,  # 外部决定的返回值
                     'title': title,
                     'message': message,
-                    'type': func_name
+                    'type': func_name,
+                    'status': 'waiting'  # waiting / resolved
                 }
+            
+            # 通知外部系统弹窗出现
+            # 修复 Windows 中文编码问题（tkinter 使用 GBK，需要转为 UTF-8）
+            def fix_encoding(s):
+                if isinstance(s, bytes):
+                    return s.decode('utf-8', errors='replace')
+                # Windows 下字符串可能是 GBK 编码的 str，需要转换
+                try:
+                    # 尝试用 latin-1 编码为 bytes，再用 gbk 解码
+                    return s.encode('latin-1').decode('gbk', errors='replace')
+                except:
+                    return s
             
             popup_data = {
                 'id': popup_id,
                 'type': func_name,
-                'title': title,
-                'message': message
+                'title': fix_encoding(title),
+                'message': fix_encoding(message)
             }
             popup_event_queue.put(popup_data)
-            log_to_file(f"[Popup] 控制弹窗已拦截: [{func_name}] {title}")
+            log_to_file(f"[Popup] 弹窗已显示，等待外部决策: [{func_name}] {title}")
             
-            # 阻塞等待外部决策（最多60秒）
-            total_wait = 0
-            while not wait_event.is_set() and total_wait < 60:
-                time.sleep(0.1)
-                total_wait += 0.1
+            # TCP 广播给 MaaFgo
+            global _broadcast_popup
+            if _broadcast_popup:
+                try:
+                    _broadcast_popup(popup_data)
+                    log_to_file(f"[TCP] 弹窗已广播: {popup_id}")
+                except Exception as e:
+                    log_to_file(f"[TCP] 广播失败: {e}")
             
-            with _popup_wait_lock:
-                popup_info = _popup_wait_dict.pop(popup_id, {})
-                result = popup_info.get('result', 'ok')
+            # 显示原生弹窗，但返回值由外部系统控制
+            return create_externally_controlled_dialog(func_name, title, message, popup_id, original_func, **kwargs)
             
-            log_to_file(f"[Popup] 外部决策: {title} -> {result}")
-            
-            # 根据弹窗类型返回相应的值
-            if func_name in ['showinfo', 'showwarning', 'showerror']:
-                return None
-            elif func_name == 'askokcancel':
-                return result == 'ok'
-            elif func_name == 'askyesno':
-                return result == 'ok' or result == 'yes'
-            elif func_name == 'askretrycancel':
-                return result == 'ok' or result == 'retry'
-            else:
-                return result == 'ok'
         return wrapper
+    
+    def create_externally_controlled_dialog(func_name, title, message, popup_id, original_func, **kwargs):
+        """
+        外部控制弹窗返回值
+        1. 显示原生弹窗（不拦截）
+        2. 通知外部系统
+        3. 外部系统返回决策值
+        4. 关闭弹窗并返回外部决定的值给 BBC
+        """
+        import threading
+        import time
+        import ctypes
+        from ctypes import wintypes
+        
+        # Windows API 定义
+        user32 = ctypes.windll.user32
+        WM_CLOSE = 0x0010
+        
+        def find_popup_window(popup_title):
+            """通过标题查找弹窗窗口句柄"""
+            hwnd = user32.FindWindowW(None, popup_title)
+            return hwnd
+        
+        def close_popup_window(hwnd):
+            """关闭弹窗窗口"""
+            if hwnd and hwnd != 0:
+                user32.PostMessageW(hwnd, WM_CLOSE, 0, 0)
+                return True
+            return False
+        
+        # 用于存储外部决策结果和窗口句柄
+        popup_data = {'value': None, 'resolved': False, 'hwnd': None}
+        
+        def monitor_external():
+            """后台线程：等待外部系统决策，然后关闭弹窗"""
+            # 免责声明直接2秒后自动接受，不等待外部决策
+            is_disclaimer = "免责声明" in title
+            
+            if is_disclaimer:
+                # 免责声明：等待2秒后自动接受
+                time.sleep(2.0)
+                popup_data['value'] = 'ok'
+                popup_data['resolved'] = True
+                hwnd = find_popup_window(title)
+                if hwnd:
+                    log_to_file(f"[Popup] 免责声明2秒超时，自动接受并关闭")
+                    close_popup_window(hwnd)
+                return
+            
+            # 其他弹窗：一直等待外部决策（弹窗没关，BBC会停止在那里）
+            while not popup_data['resolved']:
+                with _popup_wait_lock:
+                    popup_info = _popup_wait_dict.get(popup_id)
+                    if popup_info and popup_info.get('status') == 'resolved':
+                        popup_data['value'] = popup_info.get('result')
+                        popup_data['resolved'] = True
+                        # 获取窗口句柄并关闭弹窗
+                        hwnd = find_popup_window(title)
+                        if hwnd:
+                            popup_data['hwnd'] = hwnd
+                            log_to_file(f"[Popup] 找到弹窗句柄: {hwnd}，准备关闭")
+                            close_popup_window(hwnd)
+                        break
+                time.sleep(0.1)
+        
+        # 启动监控线程
+        monitor_thread = threading.Thread(target=monitor_external, daemon=True)
+        monitor_thread.start()
+        
+        # 显示原生弹窗（阻塞等待，但会被外部线程关闭）
+        log_to_file(f"[Popup] 显示原生弹窗: {title}")
+        original_result = original_func(title, message, **kwargs)
+        log_to_file(f"[Popup] 弹窗已关闭，原始返回值: {original_result}")
+        
+        # 等待监控线程结束
+        monitor_thread.join(timeout=1)
+        
+        # 清理 - 从等待字典和队列中移除
+        with _popup_wait_lock:
+            _popup_wait_dict.pop(popup_id, None)
+        
+        # 从队列中移除已处理的弹窗
+        _remove_popup_from_queue(popup_id)
+        
+        # 如果外部有决策，返回外部决定的值；否则返回原始值
+        if popup_data['resolved']:
+            result = popup_data['value']
+            log_to_file(f"[Popup] 返回外部决定的值: {result}")
+        else:
+            result = original_result
+            log_to_file(f"[Popup] 无外部决策，返回原始值: {result}")
+        
+        # 转换为布尔值
+        if func_name == 'askyesno':
+            return result == 'yes' if isinstance(result, str) else bool(result)
+        elif func_name == 'askokcancel':
+            return result == 'ok' if isinstance(result, str) else bool(result)
+        elif func_name == 'askretrycancel':
+            return result == 'retry' if isinstance(result, str) else bool(result)
+        else:
+            return None
     
     # 替换 messagebox 函数
     messagebox.showinfo = create_popup_wrapper('showinfo', original_messagebox['showinfo'])
@@ -197,8 +334,8 @@ def start_http_server(bb_window, port=16888):
                     popup_event_queue.put(p)
                 self.send_json({'popups': popups})
             
-            elif self.path == '/settings':
-                # 获取当前设置
+            elif self.path == '/get':
+                # 获取全部设置
                 try:
                     page = self.bb.pages[0]
                     settings = {
@@ -231,40 +368,40 @@ def start_http_server(bb_window, port=16888):
             
             elif self.path == '/connect/mumu':
                 # MuMu连接
-                result = cli_connect_mumu(self.bb, type('Args', (), data)())
+                result = api_connect_mumu(self.bb, type('Args', (), data)())
                 self.send_json({'success': result})
             
             elif self.path == '/connect/ld':
                 # 雷电连接
-                result = cli_connect_ld(self.bb, type('Args', (), data)())
+                result = api_connect_ld(self.bb, type('Args', (), data)())
                 self.send_json({'success': result})
             
             elif self.path == '/connect/adb':
                 # ADB连接
-                result = cli_connect_adb(self.bb, type('Args', (), data)())
+                result = api_connect_adb(self.bb, type('Args', (), data)())
                 self.send_json({'success': result})
             
-            elif self.path == '/set/apple':
+            elif self.path == '/set/appletype':
                 # 设置苹果类型
                 try:
                     page = self.bb.pages[0]
-                    cli_set_apple_type(page, data.get('type'))
+                    api_set_apple_type(page, data.get('type'))
                     self.send_json({'success': True})
                 except Exception as e:
                     import traceback
                     traceback.print_exc()
                     self.send_json({'error': str(e), 'traceback': traceback.format_exc()}, 500)
             
-            elif self.path == '/set/times':
+            elif self.path == '/set/runcount':
                 # 设置运行次数
                 page = self.bb.pages[0]
-                cli_set_run_times(page, data.get('times'))
+                api_set_run_times(page, data.get('times'))
                 self.send_json({'success': True})
             
             elif self.path == '/set/battletype':
                 # 设置战斗类型
                 page = self.bb.pages[0]
-                cli_set_battle_type(page, data.get('type'))
+                api_set_battle_type(page, data.get('type'))
                 self.send_json({'success': True})
             
             elif self.path == '/start':
@@ -273,8 +410,8 @@ def start_http_server(bb_window, port=16888):
                     log_to_file("[/start] 端点被调用")
                     page = self.bb.pages[0]
                     log_to_file(f"[/start] 获取到 page: {page}")
-                    result = cli_start_battle(page)
-                    log_to_file(f"[/start] cli_start_battle 返回: {result}")
+                    result = api_start_battle(page)
+                    log_to_file(f"[/start] api_start_battle 返回: {result}")
                     self.send_json({'success': result})
                 except Exception as e:
                     import traceback
@@ -292,7 +429,7 @@ def start_http_server(bb_window, port=16888):
             elif self.path == '/popup/response':
                 # 响应弹窗（外部系统返回决策）
                 popup_id = data.get('id', '')
-                action = data.get('action', '')  # "ok", "cancel", "yes", "no"
+                action = data.get('action', '')  # "ok", "cancel", "yes", "no", "retry"
                 
                 if not popup_id or not action:
                     self.send_json({'error': 'id and action required'}, 400)
@@ -306,11 +443,10 @@ def start_http_server(bb_window, port=16888):
                     # 查找等待中的弹窗
                     with _popup_wait_lock:
                         popup_info = _popup_wait_dict.get(popup_id)
-                        if popup_info:
-                            # 设置决策结果
+                        if popup_info and popup_info.get('status') == 'waiting':
+                            # 设置决策结果并标记为已解决
                             popup_info['result'] = action
-                            # 唤醒等待的线程
-                            popup_info['event'].set()
+                            popup_info['status'] = 'resolved'
                             self.send_json({
                                 'success': True, 
                                 'message': f'Popup {popup_id} resolved with action: {action}',
@@ -337,16 +473,68 @@ def start_http_server(bb_window, port=16888):
     def run_server():
         server = HTTPServer(('127.0.0.1', port), BBchannelHandler)
         http_server_instance = server
-        print(f"[HTTP-Server] 启动于 http://127.0.0.1:{port}")
-        server.serve_forever()
+        print(f"[HTTP-Server] 启动于 http://127.0.0.1:{port} (独立运行模式)")
+        server.serve_forever()  # 持续运行，不随战斗线程停止
     
     threading.Thread(target=run_server, daemon=True).start()
+    
+    # 启动 TCP Server（用于 MaaFgo 连接）
+    def run_tcp_server():
+        import socket
+        import json
+        
+        global tcp_server_instance
+        tcp_clients = []  # 连接的客户端列表
+        tcp_lock = threading.Lock()
+        
+        def broadcast_popup(popup_data):
+            """向所有 TCP 客户端广播弹窗信息"""
+            with tcp_lock:
+                disconnected = []
+                for client in tcp_clients:
+                    try:
+                        msg = json.dumps(popup_data, ensure_ascii=False).encode('utf-8')
+                        client.sendall(len(msg).to_bytes(4, 'big') + msg)
+                    except:
+                        disconnected.append(client)
+                
+                # 清理断开连接
+                for client in disconnected:
+                    tcp_clients.remove(client)
+                    try:
+                        client.close()
+                    except:
+                        pass
+        
+        # 保存广播函数供外部使用
+        global _broadcast_popup
+        _broadcast_popup = broadcast_popup
+        
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        sock.bind(('127.0.0.1', TCP_PORT))
+        sock.listen(5)
+        tcp_server_instance = sock
+        print(f"[TCP-Server] 启动于 127.0.0.1:{TCP_PORT} (独立运行模式)")
+        
+        while True:
+            try:
+                client, addr = sock.accept()
+                print(f"[TCP-Server] 客户端连接: {addr}")
+                with tcp_lock:
+                    tcp_clients.append(client)
+            except Exception as e:
+                print(f"[TCP-Server] 错误: {e}")
+                break
+    
+    threading.Thread(target=run_tcp_server, daemon=True).start()
 
 
-# ==================== CLI Functions ====================
+# ==================== API Internal Functions ====================
+# 这些函数被 HTTP API 端点内部调用，不是命令行接口
 
-def cli_connect_mumu(bb, args):
-    """命令行模式连接 MuMu 模拟器"""
+def api_connect_mumu(bb, args):
+    """API 内部函数：连接 MuMu 模拟器"""
     import os
     import json
     
@@ -362,7 +550,7 @@ def cli_connect_mumu(bb, args):
             with open("MuMuInstallPath.txt", "r", encoding="utf8") as f:
                 path = f.read().strip()
         if not path:
-            print("[CLI错误] 未指定MuMu安装路径")
+            print("[API错误] 未指定MuMu安装路径")
             return False
     
     try:
@@ -383,15 +571,15 @@ def cli_connect_mumu(bb, args):
         page.snapshotDevice = page.operateDevice = page.device.snapshotDevice = page.device.operateDevice = device
         bb.pagebar.tags[page.idx].createText(True)
         bb.updateConnectLst(page.idx)
-        print(f"[CLI] MuMu连接成功: {emulator_name}")
+        print(f"[API] MuMu连接成功: {emulator_name}")
         return True
     except Exception as e:
-        print(f"[CLI错误] MuMu连接失败: {e}")
+        print(f"[API错误] MuMu连接失败: {e}")
         return False
 
 
-def cli_connect_ld(bb, args):
-    """命令行模式连接雷电模拟器"""
+def api_connect_ld(bb, args):
+    """API 内部函数：连接雷电模拟器"""
     import os
     
     page = bb.pages[0]
@@ -404,7 +592,7 @@ def cli_connect_ld(bb, args):
             with open("LDInstallPath.txt", "r", encoding="utf8") as f:
                 path = f.read().strip()
         if not path:
-            print("[CLI 错误] 未指定雷电安装路径")
+            print("[API 错误] 未指定雷电安装路径")
             return False
     
     try:
@@ -427,17 +615,17 @@ def cli_connect_ld(bb, args):
         
         bb.pagebar.tags[page.idx].createText(True)
         bb.updateConnectLst(page.idx)
-        print(f"[CLI] 雷电连接成功：编号{index}")
+        print(f"[API] 雷电连接成功：编号{index}")
         return True
     except Exception as e:
-        print(f"[CLI 错误] 雷电连接失败：{e}")
+        print(f"[API 错误] 雷电连接失败：{e}")
         import traceback
         traceback.print_exc()
         return False
 
 
-def cli_connect_adb(bb, args):
-    """命令行模式ADB连接"""
+def api_connect_adb(bb, args):
+    """API 内部函数：ADB 连接"""
     from bbcmd import cmd
     from device import Android, USE_AS_BOTH
     import os
@@ -447,14 +635,14 @@ def cli_connect_adb(bb, args):
     adb_path = os.path.join(os.path.dirname(sys.executable), "airtest", "core", "android", "static", "adb", "windows")
     
     if not os.path.exists(os.path.join(adb_path, "adb.exe")):
-        print(f"[CLI错误] 找不到 adb.exe: {adb_path}")
+        print(f"[API错误] 找不到 adb.exe: {adb_path}")
         return False
     
     page = bb.pages[0]
     
     ip_port = getattr(args, 'ip', None)
     if not ip_port:
-        print("[CLI错误] ADB连接需要指定ip参数")
+        print("[API错误] ADB连接需要指定ip参数")
         return False
     
     try:
@@ -463,20 +651,20 @@ def cli_connect_adb(bb, args):
         
         if not device.available:
             device.disconnect()
-            print("[CLI错误] ADB设备连接失败")
+            print("[API错误] ADB设备连接失败")
             return False
         
         page.snapshotDevice = page.operateDevice = page.device.snapshotDevice = page.device.operateDevice = device
         bb.pagebar.tags[page.idx].createText(True)
         bb.updateConnectLst(page.idx)
-        print(f"[CLI] ADB连接成功: {ip_port}")
+        print(f"[API] ADB连接成功: {ip_port}")
         return True
     except Exception as e:
-        print(f"[CLI错误] ADB连接失败: {e}")
+        print(f"[API错误] ADB连接失败: {e}")
         return False
 
 
-def cli_set_apple_type(page, apple_type):
+def api_set_apple_type(page, apple_type):
     """设置苹果类型"""
     if not apple_type:
         return
@@ -496,35 +684,35 @@ def cli_set_apple_type(page, apple_type):
         try:
             apple_set.appleIconPhoto = apple_set.getAppleIconPhoto()
             apple_set.appleIcon.config(image=apple_set.appleIconPhoto)
-            print(f"[CLI] 苹果类型已设置: {apple_type}")
+            print(f"[API] 苹果类型已设置: {apple_type}")
         except Exception as e:
-            print(f"[CLI警告] 苹果类型已设置但UI更新失败: {e}")
-            print(f"[CLI] 苹果类型已设置: {apple_type}")
+            print(f"[API警告] 苹果类型已设置但UI更新失败: {e}")
+            print(f"[API] 苹果类型已设置: {apple_type}")
 
 
-def cli_set_run_times(page, times):
+def api_set_run_times(page, times):
     """设置运行次数"""
     if times is None:
         return
     
     try:
         page.appleSet.runTimes.set(times)
-        print(f"[CLI] 运行次数: {times}")
+        print(f"[API] 运行次数: {times}")
     except Exception as e:
-        print(f"[CLI错误] 设置运行次数失败: {e}")
+        print(f"[API错误] 设置运行次数失败: {e}")
 
 
-def cli_set_battle_type(page, battle_type):
+def api_set_battle_type(page, battle_type):
     """设置战斗类型"""
     if not battle_type:
         return
     
     if battle_type == "continuous":
         page.battletype.set(CT.BATTLE_TYPE[0])
-        print("[CLI] 战斗类型: 连续出击")
+        print("[API] 战斗类型: 连续出击")
     elif battle_type == "single":
         page.battletype.set(CT.BATTLE_TYPE[1])
-        print("[CLI] 战斗类型: 单次")
+        print("[API] 战斗类型: 单次")
 
 
 def log_to_file(msg):
@@ -540,28 +728,28 @@ def log_to_file(msg):
         # 如果连日志都写不了，就忽略错误
         pass
 
-def cli_start_battle(page):
+def api_start_battle(page):
     """开始战斗"""
-    log_to_file(f"[CLI] cli_start_battle 被调用")
+    log_to_file(f"[API] api_start_battle 被调用")
     
     if Battle is None:
-        log_to_file("[CLI错误] Battle 类未导入，无法开始战斗")
+        log_to_file("[API错误] Battle 类未导入，无法开始战斗")
         return False
     
     try:
-        log_to_file(f"[CLI] 检查从者配置...")
+        log_to_file(f"[API] 检查从者配置...")
         for i in range(3):
             exist = page.servantGroup[i].exist
-            log_to_file(f"[CLI] 从者 {i}: exist={exist}")
+            log_to_file(f"[API] 从者 {i}: exist={exist}")
             if not exist:
-                log_to_file("[CLI错误] 出战从者不足")
+                log_to_file("[API错误] 出战从者不足")
                 return False
         
         times = page.appleSet.runTimes.get()
         battle_type = page.battletype.get()
-        log_to_file(f"[CLI] 战斗参数: 次数={times}, 类型={battle_type}")
+        log_to_file(f"[API] 战斗参数: 次数={times}, 类型={battle_type}")
         
-        log_to_file(f"[CLI] 模拟点击开始按钮...")
+        log_to_file(f"[API] 模拟点击开始按钮...")
         
         # 使用 event_generate 模拟按钮点击，触发 startScript
         # 这样停止按钮也会正常工作
@@ -571,59 +759,15 @@ def cli_start_battle(page):
             btn_y = page.start.winfo_height() // 2
             # 生成点击事件
             page.start.event_generate("<Button-1>", x=btn_x, y=btn_y)
-            log_to_file("[CLI] 已触发按钮点击事件")
+            log_to_file("[API] 已触发按钮点击事件")
         except Exception as e:
             import traceback
-            log_to_file(f"[CLI Error] 模拟点击失败: {e}")
+            log_to_file(f"[API Error] 模拟点击失败: {e}")
             log_to_file(traceback.format_exc())
             return False
         return True
     except Exception as e:
         import traceback
-        log_to_file(f"[CLI错误] 开始战斗失败: {e}")
+        log_to_file(f"[API错误] 开始战斗失败: {e}")
         log_to_file(traceback.format_exc())
         return False
-
-
-if __name__ == "__main__":
-    import argparse
-    import sys
-    
-    # 添加当前目录到路径
-    import os
-    current_dir = os.path.dirname(os.path.abspath(__file__))
-    if current_dir not in sys.path:
-        sys.path.insert(0, current_dir)
-    
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--server", action="store_true", help="启动 HTTP API 服务模式")
-    parser.add_argument("--port", type=int, default=16888, help="HTTP 服务端口")
-    args = parser.parse_args()
-    
-    if args.server:
-        # HTTP API 服务模式 - 独立运行
-        print('[HTTP API] Starting standalone server...')
-        try:
-            from BBchannelUI import BBchannelWindow
-            bbchannel = BBchannelWindow()
-            start_http_server(bbchannel, args.port)
-            bbchannel.startBB()
-        except ImportError:
-            print('[HTTP API] BBchannelUI not available, running without GUI')
-            # 创建一个虚拟窗口对象
-            class DummyWindow:
-                pass
-            dummy = DummyWindow()
-            start_http_server(dummy, args.port)
-            # 保持运行
-            import time
-            while True:
-                time.sleep(1)
-    else:
-        # 正常 GUI 模式
-        try:
-            from BBchannelUI import BBchannelWindow
-            bbchannel = BBchannelWindow()
-            bbchannel.startBB()
-        except ImportError:
-            print('BBchannelUI not available')
