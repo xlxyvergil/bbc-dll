@@ -216,7 +216,7 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
         // 首先加载原始 _ctypes.pyd
         wchar_t originalPath[MAX_PATH];
         GetCurrentDirectoryW(MAX_PATH, originalPath);
-        wcscat_s(originalPath, MAX_PATH, L"\\original\\_ctypes.pyd");
+        wcscat_s(originalPath, MAX_PATH, L"\\_ctypes_orig.pyd");
         
         hOriginal = LoadLibraryW(originalPath);
         if (!hOriginal) {
