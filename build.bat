@@ -39,14 +39,8 @@ dir %OUTPUT% /-C | findstr /R "^[0-9]"
 
 echo.
 echo ==========================================
-echo [5] Copy to BBchannel64? (Y/N)
-set /p choice=
-if /I "%choice%"=="Y" (
-    copy /Y %OUTPUT% ..\BBchannel\dist\BBchannel64\
-    copy /Y bbc_tcp_server.py ..\BBchannel\dist\BBchannel64\
-    echo [4] Files copied to BBchannel64
-)
-
-echo.
-echo Done.
+echo Build complete. Manual copy required:
+echo   1. Copy %OUTPUT% to BBchannel\dist\BBchannel64\
+echo   2. Copy bbc_tcp_server.py to BBchannel\dist\BBchannel64\
+echo ==========================================
 pause
