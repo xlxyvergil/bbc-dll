@@ -335,6 +335,13 @@ def start_tcp_server(bb_window, port=25001):
                 })())
                 return {'success': result}
             
+            elif command == 'connect_ld':
+                result = api_connect_ld(_bb_window_global, type('Args', (), {
+                    'path': args.get('path'),
+                    'index': args.get('index', 0)
+                })())
+                return {'success': result}
+            
             elif command == 'set_appletype':
                 page = _bb_window_global.pages[0]
                 apple_type = args.get('type')
@@ -562,6 +569,52 @@ def api_load_config(bb, filename):
         return True
     except Exception as e:
         log_to_file(f"[LoadConfig] Error: {e}")
+        import traceback
+        traceback.print_exc()
+        return False
+
+def api_connect_ld(bb, args):
+    """连接雷电模拟器（高速接口）"""
+    import os
+    import json
+    
+    page = bb.pages[0]
+    
+    path = getattr(args, 'path', None)
+    index = getattr(args, 'index', 0) or 0
+    
+    if not path:
+        if os.path.exists("LDInstallPath.txt"):
+            with open("LDInstallPath.txt", "r", encoding="utf8") as f:
+                path = f.read().strip()
+        if not path:
+            print("[API错误] 未指定雷电安装路径")
+            return False
+    
+    try:
+        path = LDdevice.checkPath(path)
+        with open("LDInstallPath.txt", "w", encoding="utf8") as f:
+            f.write(path)
+        
+        device = LDdevice(path, index)
+        serialno = {'name': str(index)}
+        serialno_str = json.dumps(serialno, ensure_ascii=False)
+        device.set_serialno(serialno_str)
+        device.snapshot()
+        
+        # 创建 Windows 触摸设备
+        from device import Windows
+        touchDevice = Windows(device.player.bndWnd)
+        
+        # 设置设备
+        page.snapshotDevice = page.device.snapshotDevice = device
+        page.operateDevice = page.device.operateDevice = touchDevice
+        
+        bb.pagebar.tags[page.idx].createText(True)
+        print(f"[API] 雷电连接成功：编号{index}")
+        return True
+    except Exception as e:
+        print(f"[API错误] 雷电连接失败：{e}")
         import traceback
         traceback.print_exc()
         return False
