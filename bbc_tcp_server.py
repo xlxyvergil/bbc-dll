@@ -342,6 +342,12 @@ def start_tcp_server(bb_window, port=25001):
                 })())
                 return {'success': result}
             
+            elif command == 'connect_adb':
+                result = api_connect_adb(_bb_window_global, type('Args', (), {
+                    'ip': args.get('ip')
+                })())
+                return {'success': result}
+            
             elif command == 'set_appletype':
                 page = _bb_window_global.pages[0]
                 apple_type = args.get('type')
@@ -615,6 +621,48 @@ def api_connect_ld(bb, args):
         return True
     except Exception as e:
         print(f"[API错误] 雷电连接失败：{e}")
+        import traceback
+        traceback.print_exc()
+        return False
+
+def api_connect_adb(bb, args):
+    """连接 ADB 设备（IP:端口方式）"""
+    import os
+    import sys
+    
+    page = bb.pages[0]
+    
+    ip_port = getattr(args, 'ip', None)
+    if not ip_port:
+        print("[API错误] ADB连接需要指定ip参数")
+        return False
+    
+    try:
+        # 使用 airtest 内置的 adb
+        adb_path = os.path.join(os.path.dirname(sys.executable), "airtest", "core", "android", "static", "adb", "windows")
+        if not os.path.exists(os.path.join(adb_path, "adb.exe")):
+            log_to_file(f"[API错误] 找不到 adb.exe: {adb_path}")
+            return False
+        
+        # 执行 adb connect
+        from bbcmd import cmd
+        print(cmd(f'"{adb_path}/adb" connect {ip_port}'))
+        
+        # 创建设备实例
+        from device import Android, USE_AS_BOTH
+        device = Android(ip_port, page.server, USE_AS_BOTH, cap_method="Minicap")
+        
+        if not device.available:
+            device.disconnect()
+            print("[API错误] ADB设备连接失败")
+            return False
+        
+        page.snapshotDevice = page.operateDevice = page.device.snapshotDevice = page.device.operateDevice = device
+        bb.pagebar.tags[page.idx].createText(True)
+        print(f"[API] ADB连接成功: {ip_port}")
+        return True
+    except Exception as e:
+        print(f"[API错误] ADB连接失败: {e}")
         import traceback
         traceback.print_exc()
         return False
