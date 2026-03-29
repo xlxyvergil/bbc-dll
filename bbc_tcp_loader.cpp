@@ -1,6 +1,6 @@
 /*
- * BBchannel HTTP API Loader - DLL 劫持版本
- * 劫持 _ctypes.pyd，在加载时自动执行 Python 代码导入 http_api_server
+ * BBchannel TCP Server Loader - DLL 劫持版本
+ * 劫持 _ctypes.pyd，在加载时自动执行 Python 代码导入 bbc_tcp_server
  */
 
 #include <windows.h>
@@ -15,7 +15,7 @@ static HMODULE hOriginal = NULL;
 typedef void* (*PyInitFunc)(void);
 static PyInitFunc original_PyInit__ctypes = NULL;
 
-// 初始化 Python，导入 http_api_server
+// 初始化 Python，导入 bbc_tcp_server
 void InitPython() {
     // 获取 DLL 所在目录
     wchar_t dllPath[MAX_PATH];
