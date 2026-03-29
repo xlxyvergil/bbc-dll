@@ -39,8 +39,7 @@ dir %OUTPUT% /-C | findstr /R "^[0-9]"
 
 echo.
 echo ==========================================
-echo Build complete. Manual copy required:
-echo   1. Copy %OUTPUT% to BBchannel\dist\BBchannel64\
-echo   2. Copy bbc_tcp_server.py to BBchannel\dist\BBchannel64\
+echo Build complete!
+echo Output: %OUTPUT%
 echo ==========================================
 pause
