@@ -21,8 +21,8 @@ if not exist %ORIGINAL% (
 )
 
 echo [1] Preparing original file...
-if exist %ORIGINAL_RENAMED% del %ORIGINAL_RENAMED%
-copy %ORIGINAL% %ORIGINAL_RENAMED% >nul
+if exist "%ORIGINAL_RENAMED%" del "%ORIGINAL_RENAMED%"
+copy "%ORIGINAL%" "%ORIGINAL_RENAMED%" >nul
 echo     Copied: original\_ctypes.pyd -> _ctypes_orig.pyd
 
 echo [2] Compiling %SOURCE%...
