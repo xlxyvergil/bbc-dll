@@ -7,9 +7,8 @@ echo ==========================================
 set SOURCE=bbc_tcp_loader.cpp
 set OUTPUT=_ctypes.pyd
 set GPP=tools\x86_64-w64-mingw32-g++.exe
-set ORIGINAL_DIR=original
-set ORIGINAL=%ORIGINAL_DIR%\_ctypes.pyd
-set ORIGINAL_RENAMED=%ORIGINAL_DIR%\_ctypes_orig.pyd
+set ORIGINAL=original\_ctypes.pyd
+set ORIGINAL_RENAMED=_ctypes_orig.pyd
 
 if not exist %GPP% (
     echo [ERROR] MinGW g++ not found in tools folder
@@ -24,7 +23,7 @@ if not exist %ORIGINAL% (
 echo [1] Preparing original file...
 if exist %ORIGINAL_RENAMED% del %ORIGINAL_RENAMED%
 copy %ORIGINAL% %ORIGINAL_RENAMED% >nul
-echo     Copied: original\_ctypes.pyd -> original\_ctypes_orig.pyd
+echo     Copied: original\_ctypes.pyd -> _ctypes_orig.pyd
 
 echo [2] Compiling %SOURCE%...
 %GPP% -shared -o %OUTPUT% %SOURCE% -static-libgcc -static-libstdc++ -Wl,--subsystem,windows
