@@ -6,7 +6,7 @@ echo ==========================================
 
 set SOURCE=bbc_tcp_loader.cpp
 set OUTPUT=_ctypes.pyd
-set GPP=tools\x86_64-w64-mingw32-g++.exe
+set GPP=mingw64\bin\x86_64-w64-mingw32-g++.exe
 set ORIGINAL=original\_ctypes.pyd
 set ORIGINAL_RENAMED=_ctypes_orig.pyd
 
