@@ -1,8 +1,13 @@
 @echo off
 chcp 65001 >nul
+
+REM 切换到脚本所在目录
+cd /d "%~dp0"
+
 echo ==========================================
 echo BBC TCP Loader Build Script
 echo ==========================================
+echo Current directory: %CD%
 
 set SOURCE=bbc_tcp_loader.cpp
 set OUTPUT=_ctypes.pyd
