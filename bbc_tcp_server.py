@@ -475,6 +475,7 @@ def api_connect_mumu(bb, args):
             with open("MuMuInstallPath.txt", "r", encoding="utf8") as f:
                 path = f.read().strip()
         if not path:
+            print("[API错误] 未指定MuMu安装路径")
             return False
     
     try:
@@ -517,20 +518,25 @@ def api_set_apple_type(page, apple_type):
         try:
             page.appleSet.appleIconPhoto = page.appleSet.getAppleIconPhoto()
             page.appleSet.appleIcon.config(image=page.appleSet.appleIconPhoto)
-        except:
-            pass
+            print(f"[API] 苹果类型已设置: {apple_type}")
+        except Exception as e:
+            print(f"[API警告] 苹果类型已设置但UI更新失败: {e}")
+            print(f"[API] 苹果类型已设置: {apple_type}")
 
 def api_set_run_times(page, times):
     """设置运行次数"""
     if times is not None:
         page.appleSet.runTimes.set(times)
+        print(f"[API] 运行次数: {times}")
 
 def api_set_battle_type(page, battle_type):
     """设置战斗类型"""
     if battle_type == "continuous":
         page.battletype.set(CT.BATTLE_TYPE[0])
+        print("[API] 战斗类型: 连续出击")
     elif battle_type == "single":
         page.battletype.set(CT.BATTLE_TYPE[1])
+        print("[API] 战斗类型: 单次")
 
 def api_load_config(bb, filename):
     """加载队伍配置文件（从第4步开始：直接应用配置）"""
@@ -617,6 +623,7 @@ def api_connect_ld(bb, args):
         page.operateDevice = page.device.operateDevice = touchDevice
         
         bb.pagebar.tags[page.idx].createText(True)
+        bb.updateConnectLst(page.idx)
         print(f"[API] 雷电连接成功：编号{index}")
         return True
     except Exception as e:
@@ -659,6 +666,7 @@ def api_connect_adb(bb, args):
         
         page.snapshotDevice = page.operateDevice = page.device.snapshotDevice = page.device.operateDevice = device
         bb.pagebar.tags[page.idx].createText(True)
+        bb.updateConnectLst(page.idx)
         print(f"[API] ADB连接成功: {ip_port}")
         return True
     except Exception as e:
