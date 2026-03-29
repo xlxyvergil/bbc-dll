@@ -33,7 +33,7 @@ void InitPython() {
     // 创建日志文件 - 使用 DLL 所在目录
     wchar_t logPath[MAX_PATH];
     wcscpy_s(logPath, MAX_PATH, dllPath);
-    wcscat_s(logPath, MAX_PATH, L"\\http_api_injection.log");
+    wcscat_s(logPath, MAX_PATH, L"\\bbc_tcp_injection.log");
     
     FILE* log = nullptr;
     _wfopen_s(&log, logPath, L"a, ccs=UTF-8");
@@ -41,7 +41,7 @@ void InitPython() {
         return;
     }
     
-    fwprintf(log, L"\n=== HTTP API Injection Started ===\n");
+    fwprintf(log, L"\n=== BBC TCP Injection Started ===\n");
     fwprintf(log, L"MAX_PATH constant: %d\n", MAX_PATH);
     
     wchar_t testPath[MAX_PATH];
@@ -58,10 +58,10 @@ void InitPython() {
     fprintf(log, "[1] Starting injection...\n");
     fflush(log);
     
-    // 使用 DLL 所在目录构建 http_api_server.py 路径
+    // 使用 DLL 所在目录构建 bbc_tcp_server.py 路径
     wchar_t scriptPath[MAX_PATH];
     wcscpy_s(scriptPath, MAX_PATH, dllPath);
-    wcscat_s(scriptPath, MAX_PATH, L"\\http_api_server.py");
+    wcscat_s(scriptPath, MAX_PATH, L"\\bbc_tcp_server.py");
     
     fprintf(log, "[2] Script path: %S\n", scriptPath);
     fprintf(log, "[2] Script path length: %zu\n", wcslen(scriptPath));
@@ -79,7 +79,7 @@ void InitPython() {
     }
     
     if (log) {
-        fwprintf(log, L"[2] Found http_api_server.py: %s\n", scriptPath);
+        fwprintf(log, L"[2] Found bbc_tcp_server.py: %s\n", scriptPath);
         fflush(log);
     }
     
@@ -193,7 +193,7 @@ void InitPython() {
     }
     
     if (log) {
-        fwprintf(log, L"=== Injection Complete ===\n\n");
+        fwprintf(log, L"=== BBC TCP Injection Complete ===\n\n");
         fclose(log);
     }
 }
@@ -220,7 +220,7 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
         
         hOriginal = LoadLibraryW(originalPath);
         if (!hOriginal) {
-            OutputDebugStringW(L"[HTTP API] Failed to load original _ctypes\n");
+            OutputDebugStringW(L"[BBC TCP] Failed to load original _ctypes\n");
             break;
         }
         
