@@ -839,6 +839,14 @@ def api_run_bbc_task(args):
     
     return {'success': False, 'reason': 'timeout'}
 
+def _resolve_popup(popup_id, action):
+    """处理弹窗响应"""
+    with _popup_wait_lock:
+        popup_info = _popup_wait_dict.get(popup_id)
+        if popup_info and popup_info.get('status') == 'waiting':
+            popup_info['result'] = action
+            popup_info['status'] = 'resolved'
+
 def log_to_file(msg):
     """写入日志"""
     try:
