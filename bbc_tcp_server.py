@@ -150,6 +150,17 @@ def start_tcp_server(bb_window, port=25001):
                     sub_phase = sub_ph
                     break
             
+            # [1] 先广播阶段变更
+            phase_data = {
+                'type': 'phase_change',
+                'phase': phase,
+                'sub_phase': sub_phase,
+                'popup_title': fix_encoding(title)
+            }
+            _broadcast_to_clients(phase_data)
+            log_to_file(f"[Phase] {phase}/{sub_phase}")
+            
+            # [2] 再广播弹窗
             popup_data = {
                 'type': 'popup',
                 'id': popup_id,
@@ -160,7 +171,7 @@ def start_tcp_server(bb_window, port=25001):
                 'sub_phase': sub_phase
             }
             popup_event_queue.put(popup_data)
-            log_to_file(f"[Popup] {title} | Phase: {phase}/{sub_phase}")
+            log_to_file(f"[Popup] {title}")
             
             # TCP 广播
             _broadcast_to_clients(popup_data)
