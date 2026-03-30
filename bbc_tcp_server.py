@@ -447,8 +447,31 @@ def start_tcp_server(bb_window, port=25001):
                 return {'success': True}
             
             elif command == 'get_status':
+                # 获取设备连接状态
+                device_status = {
+                    'connected': False,
+                    'type': None,
+                    'name': None
+                }
+                
+                if _bb_window_global and hasattr(_bb_window_global, 'pages'):
+                    try:
+                        page = _bb_window_global.pages.get(_bb_window_global.showingPage)
+                        if page and hasattr(page, 'device'):
+                            device = page.device
+                            device_status['connected'] = getattr(device, 'available', False)
+                            device_status['type'] = getattr(device, 'type_', None)
+                            device_status['name'] = getattr(device, 'name', None)
+                    except:
+                        pass
+                
                 return {
                     'success': True,
+                    'connected': device_status['connected'],
+                    'device_type': device_status['type'],
+                    'device_name': device_status['name'],
+                    'current_phase': _current_phase,
+                    'current_sub_phase': _current_sub_phase,
                     'popup_queue': popup_event_queue.qsize() if popup_event_queue else 0
                 }
             
