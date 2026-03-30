@@ -101,7 +101,18 @@ def start_tcp_server(bb_window, port=25001):
         'askretrycancel': messagebox.askretrycancel
     }
     
-    CONTROLLED_POPUPS = ["免责声明", "助战排序不符合", "队伍配置错误", "自动连接失败", "脚本停止！", "正在结束任务！"]
+    # 弹窗阶段映射: (关键词, 阶段, 子阶段)
+    POPUP_PHASE_MAP = {
+        "免责声明": ("INIT", "DISCLAIMER"),
+        "自动连接失败": ("CONNECT", "AUTO_CONNECT"),
+        "助战排序不符合": ("PRE_BATTLE", "ASSIST_VERIFY"),
+        "队伍配置错误": ("PRE_BATTLE", "TEAM_CONFIG"),
+        "正在结束任务": ("STOPPING", "STOPPING"),
+        "脚本停止": ("STOPPED", "STOPPED"),
+        "其他任务运行中": ("BUSY", "BUSY"),
+    }
+    
+    CONTROLLED_POPUPS = list(POPUP_PHASE_MAP.keys())
     
     def create_popup_wrapper(func_name, original_func):
         def wrapper(title, message, **kwargs):
@@ -130,15 +141,26 @@ def start_tcp_server(bb_window, port=25001):
                 except:
                     return s
             
+            # 获取阶段信息
+            phase = "UNKNOWN"
+            sub_phase = "UNKNOWN"
+            for keyword, (ph, sub_ph) in POPUP_PHASE_MAP.items():
+                if keyword in title:
+                    phase = ph
+                    sub_phase = sub_ph
+                    break
+            
             popup_data = {
                 'type': 'popup',
                 'id': popup_id,
                 'popup_type': func_name,
                 'title': fix_encoding(title),
-                'message': fix_encoding(message)
+                'message': fix_encoding(message),
+                'phase': phase,
+                'sub_phase': sub_phase
             }
             popup_event_queue.put(popup_data)
-            log_to_file(f"[Popup] {title}")
+            log_to_file(f"[Popup] {title} | Phase: {phase}/{sub_phase}")
             
             # TCP 广播
             _broadcast_to_clients(popup_data)
