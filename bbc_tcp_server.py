@@ -346,36 +346,111 @@ def start_tcp_server(bb_window, port=25001):
                 pass
             log_to_file(f"[TCP] Client disconnected: {addr}")
     
-    def ensure_imports():
-        """确保模块已导入（延迟导入，避免在免责声明前初始化）"""
-        global CT, Battle, Windows, LDdevice, Mumudevice
-        if CT is not None:
-            return
-        
-        try:
-            from consts import Consts as CT
-            log_to_file("[Import] CT imported")
-        except Exception as e:
-            log_to_file(f"[Import Warning] CT: {e}")
-            class MockCT:
-                Gold = "gold"; Silver = "silver"; Copper = "copper"
-                Blue = "blue"; Colorful = "colorful"
-                BATTLE_TYPE = ['连续出击(或强化本)', '自动编队爬塔(应用操作序列设置)']
-            CT = MockCT()
-        
-        try:
-            from device import Windows, LDdevice, Mumudevice
-            log_to_file("[Import] device imported")
-        except Exception as e:
-            log_to_file(f"[Import Warning] device: {e}")
-        
-        try:
-            from FGObattle import Battle
-            log_to_file("[Import] Battle imported")
-        except Exception as e:
-            log_to_file(f"[Import Warning] Battle: {e}")
+def _start_state_monitor():
+    """启动状态监控线程，主动推送状态变化"""
+    import threading
+    import time
     
-    def handle_command(cmd):
+    def monitor():
+        last_state = {
+            'stage': None,
+            'running': None,
+            'device_available': None,
+            'device_running': None
+        }
+        
+        while True:
+            try:
+                if _bb_window_global:
+                    page = _bb_window_global.pages.get(_bb_window_global.showingPage)
+                    if page:
+                        # 读取 Battle 状态
+                        battle = getattr(page, 'bb', None)
+                        battle_stage = getattr(battle, 'stage', None) if battle else None
+                        battle_running = getattr(battle, 'running', None) if battle else None
+                        
+                        # 读取 Device 状态
+                        device = getattr(page, 'device', None)
+                        device_available = getattr(device, 'available', None) if device else None
+                        device_running = getattr(device, 'running', None) if device else None
+                        
+                        current = {
+                            'stage': battle_stage,
+                            'running': battle_running,
+                            'device_available': device_available,
+                            'device_running': device_running
+                        }
+                        
+                        # 检测变化
+                        if current != last_state:
+                            # 阶段映射
+                            stage_map = {
+                                0: ('PRE_BATTLE', 'ASSIST_SELECT'),
+                                1: ('PRE_BATTLE', 'TEAM_CONFIG'),
+                                2: ('PRE_BATTLE', 'LOADING'),
+                                3: ('RUNNING', 'BATTLE')
+                            }
+                            phase, sub_phase = stage_map.get(battle_stage, (None, None))
+                            
+                            # 推送状态变更
+                            state_data = {
+                                'type': 'state_update',
+                                'timestamp': time.time(),
+                                'battle': {
+                                    'stage': battle_stage,
+                                    'phase': phase,
+                                    'sub_phase': sub_phase,
+                                    'running': battle_running
+                                },
+                                'device': {
+                                    'available': device_available,
+                                    'running': device_running
+                                }
+                            }
+                            _broadcast_to_clients(state_data)
+                            log_to_file(f"[State] stage={battle_stage}, running={battle_running}, device={device_available}")
+                            
+                            last_state = current.copy()
+            except Exception as e:
+                log_to_file(f"[State Monitor] Error: {e}")
+            
+            time.sleep(0.3)  # 300ms 检测一次
+    
+    threading.Thread(target=monitor, daemon=True).start()
+    log_to_file("[State Monitor] Started")
+
+def ensure_imports():
+    """确保模块已导入（延迟导入，避免在免责声明前初始化）"""
+    global CT, Battle, Windows, LDdevice, Mumudevice
+    if CT is not None:
+        return
+    
+    try:
+        from consts import Consts as CT
+        log_to_file("[Import] CT imported")
+    except Exception as e:
+        log_to_file(f"[Import Warning] CT: {e}")
+        class MockCT:
+            Gold = "gold"; Silver = "silver"; Copper = "copper"
+            Blue = "blue"; Colorful = "colorful"
+            BATTLE_TYPE = ['连续出击(或强化本)', '自动编队爬塔(应用操作序列设置)']
+        CT = MockCT()
+    
+    try:
+        from device import Windows, LDdevice, Mumudevice
+        log_to_file("[Import] device imported")
+    except Exception as e:
+        log_to_file(f"[Import Warning] device: {e}")
+    
+    try:
+        from FGObattle import Battle
+        log_to_file("[Import] Battle imported")
+        # 启动状态监控线程
+        _start_state_monitor()
+    except Exception as e:
+        log_to_file(f"[Import Warning] Battle: {e}")
+
+def handle_command(cmd):
         """处理命令"""
         ensure_imports()
         log_to_file(f"[API] handle_command raw: {cmd}, type={type(cmd)}")
@@ -527,25 +602,25 @@ def start_tcp_server(bb_window, port=25001):
             import traceback
             log_to_file(f"[Command Error] {command}: {e}")
             return {'success': False, 'error': str(e), 'traceback': traceback.format_exc()}
+
+def run_server():
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    sock.bind(('127.0.0.1', port))
+    sock.listen(5)
+    tcp_server_instance = sock
+    print(f"[TCP-Server] Started on 127.0.0.1:{port}")
+    log_to_file(f"[TCP-Server] Started on port {port}")
     
-    def run_server():
-        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        sock.bind(('127.0.0.1', port))
-        sock.listen(5)
-        tcp_server_instance = sock
-        print(f"[TCP-Server] Started on 127.0.0.1:{port}")
-        log_to_file(f"[TCP-Server] Started on port {port}")
-        
-        while True:
-            try:
-                client, addr = sock.accept()
-                threading.Thread(target=handle_client, args=(client, addr), daemon=True).start()
-            except Exception as e:
-                log_to_file(f"[TCP] Server error: {e}")
-                break
-    
-    threading.Thread(target=run_server, daemon=True).start()
+    while True:
+        try:
+            client, addr = sock.accept()
+            threading.Thread(target=handle_client, args=(client, addr), daemon=True).start()
+        except Exception as e:
+            log_to_file(f"[TCP] Server error: {e}")
+            break
+
+threading.Thread(target=run_server, daemon=True).start()
 
 
 # ==================== API Functions ====================
