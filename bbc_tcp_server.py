@@ -52,11 +52,6 @@ def _remove_popup_from_queue(popup_id):
     for p in temp_list:
         popup_event_queue.put(p)
 
-def _broadcast_to_clients(data):
-    """向所有 TCP 客户端广播消息（已禁用）"""
-    # 广播功能已禁用，避免干扰命令响应
-    pass
-
 def start_tcp_server(bb_window, port=25001):
     """启动 TCP 服务器"""
     import socket
