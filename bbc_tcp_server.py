@@ -21,6 +21,11 @@ _tcp_clients_lock = threading.Lock()
 _popup_wait_dict = {}
 _popup_wait_lock = None
 
+# 当前阶段跟踪
+_current_phase = None
+_current_sub_phase = None
+_phase_lock = None
+
 def update_bb_window(bb_window):
     """更新全局 bb_window 引用"""
     global _bb_window_global
@@ -83,10 +88,11 @@ def start_tcp_server(bb_window, port=25001):
     
     global CT, Battle, Windows, LDdevice, Mumudevice
     global tcp_server_instance, popup_event_queue, original_messagebox
-    global _popup_wait_lock
+    global _popup_wait_lock, _phase_lock
     
     popup_event_queue = queue.Queue()
     _popup_wait_lock = threading.Lock()
+    _phase_lock = threading.Lock()
     
     # 先设置弹窗拦截（最重要）
     # 模块导入延迟到免责声明处理完之后
@@ -150,17 +156,34 @@ def start_tcp_server(bb_window, port=25001):
                     sub_phase = sub_ph
                     break
             
-            # [1] 先广播阶段变更
-            phase_data = {
-                'type': 'phase_change',
+            # 更新当前阶段
+            global _current_phase, _current_sub_phase
+            with _phase_lock:
+                prev_phase = _current_phase
+                prev_sub_phase = _current_sub_phase
+                _current_phase = phase
+                _current_sub_phase = sub_phase
+            
+            # [1] 广播阶段进入 (如果有前一个阶段，先广播退出)
+            if prev_phase:
+                exit_data = {
+                    'type': 'phase_exit',
+                    'phase': prev_phase,
+                    'sub_phase': prev_sub_phase
+                }
+                _broadcast_to_clients(exit_data)
+                log_to_file(f"[Phase] EXIT {prev_phase}/{prev_sub_phase}")
+            
+            enter_data = {
+                'type': 'phase_enter',
                 'phase': phase,
                 'sub_phase': sub_phase,
                 'popup_title': fix_encoding(title)
             }
-            _broadcast_to_clients(phase_data)
-            log_to_file(f"[Phase] {phase}/{sub_phase}")
+            _broadcast_to_clients(enter_data)
+            log_to_file(f"[Phase] ENTER {phase}/{sub_phase}")
             
-            # [2] 再广播弹窗
+            # [2] 广播弹窗
             popup_data = {
                 'type': 'popup',
                 'id': popup_id,
@@ -172,14 +195,12 @@ def start_tcp_server(bb_window, port=25001):
             }
             popup_event_queue.put(popup_data)
             log_to_file(f"[Popup] {title}")
-            
-            # TCP 广播
             _broadcast_to_clients(popup_data)
             
-            return create_controlled_dialog(func_name, title, message, popup_id, original_func, **kwargs)
+            return create_controlled_dialog(func_name, title, message, popup_id, phase, sub_phase, original_func, **kwargs)
         return wrapper
     
-    def create_controlled_dialog(func_name, title, message, popup_id, original_func, **kwargs):
+    def create_controlled_dialog(func_name, title, message, popup_id, phase, sub_phase, original_func, **kwargs):
         import threading
         import time
         import ctypes
@@ -190,8 +211,6 @@ def start_tcp_server(bb_window, port=25001):
         popup_data = {'value': None, 'resolved': False}
         
         def monitor():
-            # 免责声明也走外部决策流程，不再自动关闭
-            
             while not popup_data['resolved']:
                 with _popup_wait_lock:
                     info = _popup_wait_dict.get(popup_id)
@@ -210,7 +229,6 @@ def start_tcp_server(bb_window, port=25001):
             for _ in range(30):
                 hwnd = user32.FindWindowW(None, title)
                 if not hwnd:
-                    # 弹窗已关闭
                     log_to_file(f"[Popup] 弹窗已确认关闭: {title}")
                     break
                 time.sleep(0.1)
@@ -218,15 +236,32 @@ def start_tcp_server(bb_window, port=25001):
             # 从队列移除
             _remove_popup_from_queue(popup_id)
             
-            # 推送弹窗已关闭的信息给所有客户端
+            # [3] 推送弹窗已关闭
             close_notify = {
                 'type': 'popup_closed',
                 'id': popup_id,
                 'title': title,
-                'result': popup_data['value']
+                'result': popup_data['value'],
+                'phase': phase,
+                'sub_phase': sub_phase
             }
             _broadcast_to_clients(close_notify)
-            log_to_file(f"[TCP] 弹窗关闭通知已广播: {popup_id}")
+            log_to_file(f"[Popup] CLOSED {title}")
+            
+            # [4] 广播阶段退出
+            exit_data = {
+                'type': 'phase_exit',
+                'phase': phase,
+                'sub_phase': sub_phase
+            }
+            _broadcast_to_clients(exit_data)
+            log_to_file(f"[Phase] EXIT {phase}/{sub_phase}")
+            
+            # 清除当前阶段
+            global _current_phase, _current_sub_phase
+            with _phase_lock:
+                _current_phase = None
+                _current_sub_phase = None
             
             # 免责声明关闭后，导入模块
             if "免责声明" in title:
