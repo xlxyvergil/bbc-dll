@@ -24,6 +24,10 @@ _popup_wait_lock = None
 # 当前任务参数（用于弹窗自动处理）
 _current_task_args = {}
 
+# 任务结束标志（当用户选择取消时设置）
+_task_should_end = False
+_task_end_reason = ''
+
 def update_bb_window(bb_window):
     """更新全局 bb_window 引用"""
     global _bb_window_global
@@ -49,32 +53,9 @@ def _remove_popup_from_queue(popup_id):
         popup_event_queue.put(p)
 
 def _broadcast_to_clients(data):
-    """向所有 TCP 客户端广播消息"""
-    global _tcp_clients, _tcp_clients_lock
-    if not _tcp_clients:
-        return
-    
-    import json
-    try:
-        msg = json.dumps(data, ensure_ascii=False).encode('utf-8')
-        msg_with_len = len(msg).to_bytes(4, 'big') + msg
-        
-        with _tcp_clients_lock:
-            disconnected = []
-            for client in _tcp_clients:
-                try:
-                    client.sendall(msg_with_len)
-                except:
-                    disconnected.append(client)
-            
-            for client in disconnected:
-                _tcp_clients.remove(client)
-                try:
-                    client.close()
-                except:
-                    pass
-    except Exception as e:
-        log_to_file(f"[TCP] 广播失败: {e}")
+    """向所有 TCP 客户端广播消息（已禁用）"""
+    # 广播功能已禁用，避免干扰命令响应
+    pass
 
 def start_tcp_server(bb_window, port=25001):
     """启动 TCP 服务器"""
@@ -166,9 +147,15 @@ def start_tcp_server(bb_window, port=25001):
             # 助战排序不符合：根据参数处理
             elif '助战排序不符合' in title:
                 def auto_assist():
+                    global _task_should_end, _task_end_reason
                     time.sleep(0.5)
                     support_continue = _current_task_args.get('support_order_mismatch', True)
-                    action = 'yes' if support_continue else 'no'
+                    if support_continue:
+                        action = 'yes'
+                    else:
+                        action = 'no'
+                        _task_should_end = True
+                        _task_end_reason = 'assist_order_mismatch_cancelled'
                     _resolve_popup(popup_id, action)
                     log_to_file(f"[Auto] 助战排序已自动处理: {action}")
                 threading.Thread(target=auto_assist, daemon=True).start()
@@ -176,9 +163,15 @@ def start_tcp_server(bb_window, port=25001):
             # 队伍配置错误：根据参数处理
             elif '队伍配置错误' in title:
                 def auto_team():
+                    global _task_should_end, _task_end_reason
                     time.sleep(0.5)
                     team_continue = _current_task_args.get('team_config_error', True)
-                    action = 'ok' if team_continue else 'cancel'
+                    if team_continue:
+                        action = 'ok'
+                    else:
+                        action = 'cancel'
+                        _task_should_end = True
+                        _task_end_reason = 'team_config_error_cancelled'
                     _resolve_popup(popup_id, action)
                     log_to_file(f"[Auto] 队伍配置已自动处理: {action}")
                 threading.Thread(target=auto_team, daemon=True).start()
@@ -741,7 +734,11 @@ def api_start_battle(page):
 def api_run_bbc_task(args):
     """执行完整BBC任务流程"""
     import time
-    global _current_task_args
+    global _current_task_args, _task_should_end, _task_end_reason
+    
+    # 重置结束标志
+    _task_should_end = False
+    _task_end_reason = ''
     
     team_config = args.get('team_config', '')
     run_count = args.get('run_count', 1)
@@ -764,12 +761,22 @@ def api_run_bbc_task(args):
     
     log_to_file(f"[Task] 开始执行BBC任务: config={team_config}, count={run_count}")
     
-    # 等待免责声明关闭（自动处理，最多等5秒）
+    # 等待免责声明关闭（自动处理，等待足够时间）
     log_to_file("[Task] 等待免责声明...")
-    time.sleep(3)
+    time.sleep(5)  # 等待5秒确保免责声明已处理
     
     # 执行连接
-    if connect == 'mumu' and mumu_path:
+    log_to_file(f"[Task] 连接方式: {connect}")
+    
+    # 检查bb_window是否已设置
+    if _bb_window_global is None:
+        log_to_file("[Task Error] bb_window 未设置")
+        return {'success': False, 'reason': 'bb_window_not_set'}
+    
+    if connect == 'auto':
+        # auto模式：不执行连接，依赖BBC自动连接
+        log_to_file("[Task] auto模式：跳过手动连接，依赖BBC自动连接")
+    elif connect == 'mumu' and mumu_path:
         log_to_file("[Task] 连接MuMu模拟器...")
         if not api_connect_mumu(_bb_window_global, type('Args', (), {
             'path': mumu_path, 'index': mumu_index
@@ -787,6 +794,8 @@ def api_run_bbc_task(args):
             'ip': manual_port
         })()):
             return {'success': False, 'reason': 'adb_connect_failed'}
+    else:
+        log_to_file(f"[Task] 未知的连接方式或参数不足: {connect}")
     
     # 等待连接完成
     time.sleep(1)
@@ -809,9 +818,8 @@ def api_run_bbc_task(args):
     
     # 轮询等待战斗结束
     log_to_file("[Task] 等待战斗结束...")
-    max_wait = 3600 * 24  # 最长等待24小时
-    waited = 0
-    while waited < max_wait:
+    # 无限等待战斗结束
+    while True:
         # 检查是否有结束弹窗
         # 通过检查popup队列中是否有停止相关弹窗
         temp_list = []
@@ -822,7 +830,9 @@ def api_run_bbc_task(args):
                 p = popup_event_queue.get_nowait()
                 temp_list.append(p)
                 title = p.get('title', '')
-                if '脚本停止！' in title or '正在结束任务！' in title:
+                # 判断为战斗结束的弹窗
+                end_popups = ['脚本停止！']
+                if any(popup in title for popup in end_popups):
                     battle_ended = True
                     end_reason = p.get('message', '')
             except:
@@ -830,14 +840,25 @@ def api_run_bbc_task(args):
         for p in temp_list:
             popup_event_queue.put(p)
         
+        # 检查是否用户选择取消
+        if _task_should_end:
+            log_to_file(f"[Task] 用户选择取消，结束任务: {_task_end_reason}")
+            return {'success': False, 'reason': _task_end_reason}
+        
         if battle_ended:
             log_to_file(f"[Task] 战斗结束: {end_reason}")
+            # 关闭结束弹窗
+            end_popups = ['脚本停止！']
+            for p in temp_list:
+                title = p.get('title', '')
+                if any(popup in title for popup in end_popups):
+                    popup_id = p.get('id')
+                    if popup_id:
+                        _resolve_popup(popup_id, 'ok')
+                        log_to_file(f"[Task] 已关闭结束弹窗: {title}")
             return {'success': True, 'reason': 'completed', 'detail': end_reason}
         
         time.sleep(1)
-        waited += 1
-    
-    return {'success': False, 'reason': 'timeout'}
 
 def _resolve_popup(popup_id, action):
     """处理弹窗响应"""
