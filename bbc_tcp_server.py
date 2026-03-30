@@ -347,7 +347,7 @@ def start_tcp_server(bb_window, port=25001):
             log_to_file(f"[TCP] Client disconnected: {addr}")
     
 def _patch_battle_setattr(Battle):
-    """拦截 Battle.__setattr__，属性变化时立即主动推送"""
+    """拦截 Battle.__setattr__，stage 变化时立即主动推送阶段通知"""
     original_setattr = Battle.__setattr__
     
     def new_setattr(self, name, value):
@@ -373,19 +373,9 @@ def _patch_battle_setattr(Battle):
             }
             _broadcast_to_clients(state_data)
             log_to_file(f"[State] stage={value}, phase={phase}/{sub_phase}")
-        
-        # running 变化时立即推送运行状态
-        elif name == 'running':
-            state_data = {
-                'type': 'state_change',
-                'source': 'battle.running',
-                'running': value
-            }
-            _broadcast_to_clients(state_data)
-            log_to_file(f"[State] battle.running={value}")
     
     Battle.__setattr__ = new_setattr
-    log_to_file("[Patch] Battle.__setattr__ patched for state push")
+    log_to_file("[Patch] Battle.__setattr__ patched for stage push")
 
 
 def _patch_device_setattr(DeviceClass):
@@ -451,14 +441,12 @@ def ensure_imports():
         log_to_file(f"[Import Warning] Battle: {e}")
             
     try:
-        from device import Windows, LDdevice, Mumudevice
-        # 应用设备类属性拦截补丁
-        _patch_device_setattr(Windows)
-        _patch_device_setattr(LDdevice)
-        _patch_device_setattr(Mumudevice)
-        log_to_file("[Patch] Device classes patched for state push")
+        from device import FGOdevice
+        # 应用 FGOdevice 属性拦截补丁（running 和 available）
+        _patch_device_setattr(FGOdevice)
+        log_to_file("[Patch] FGOdevice patched for state push")
     except Exception as e:
-        log_to_file(f"[Import Warning] device patch: {e}")
+        log_to_file(f"[Import Warning] FGOdevice patch: {e}")
 
 def handle_command(cmd):
         """处理命令"""
