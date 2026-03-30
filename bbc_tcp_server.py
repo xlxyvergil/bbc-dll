@@ -128,9 +128,6 @@ def start_tcp_server(bb_window, port=25001):
             popup_event_queue.put(popup_data)
             log_to_file(f"[Popup] {title}")
             
-            # TCP 广播
-            _broadcast_to_clients(popup_data)
-            
             # 免责声明：延迟2秒后自动确认
             if '免责声明' in title:
                 def auto_disclaimer():
@@ -213,15 +210,7 @@ def start_tcp_server(bb_window, port=25001):
             # 从队列移除
             _remove_popup_from_queue(popup_id)
             
-            # 推送弹窗已关闭的信息给所有客户端
-            close_notify = {
-                'type': 'popup_closed',
-                'id': popup_id,
-                'title': title,
-                'result': popup_data['value']
-            }
-            _broadcast_to_clients(close_notify)
-            log_to_file(f"[TCP] 弹窗关闭通知已广播: {popup_id}")
+            # 弹窗关闭通知功能已移除
             
             # 免责声明关闭后，导入模块
             if "免责声明" in title:
