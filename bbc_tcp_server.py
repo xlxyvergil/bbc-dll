@@ -21,10 +21,8 @@ _tcp_clients_lock = threading.Lock()
 _popup_wait_dict = {}
 _popup_wait_lock = None
 
-# 当前阶段跟踪
-_current_phase = None
-_current_sub_phase = None
-_phase_lock = None
+# 当前任务参数（用于弹窗自动处理）
+_current_task_args = {}
 
 def update_bb_window(bb_window):
     """更新全局 bb_window 引用"""
@@ -88,11 +86,10 @@ def start_tcp_server(bb_window, port=25001):
     
     global CT, Battle, Windows, LDdevice, Mumudevice
     global tcp_server_instance, popup_event_queue, original_messagebox
-    global _popup_wait_lock, _phase_lock
+    global _popup_wait_lock
     
     popup_event_queue = queue.Queue()
     _popup_wait_lock = threading.Lock()
-    _phase_lock = threading.Lock()
     
     # 先设置弹窗拦截（最重要）
     # 模块导入延迟到免责声明处理完之后
@@ -107,18 +104,16 @@ def start_tcp_server(bb_window, port=25001):
         'askretrycancel': messagebox.askretrycancel
     }
     
-    # 弹窗阶段映射: (关键词, 阶段, 子阶段)
-    POPUP_PHASE_MAP = {
-        "免责声明": ("INIT", "DISCLAIMER"),
-        "自动连接失败": ("CONNECT", "AUTO_CONNECT"),
-        "助战排序不符合": ("PRE_BATTLE", "ASSIST_VERIFY"),
-        "队伍配置错误": ("PRE_BATTLE", "TEAM_CONFIG"),
-        "正在结束任务": ("STOPPING", "STOPPING"),
-        "脚本停止": ("STOPPED", "STOPPED"),
-        "其他任务运行中": ("BUSY", "BUSY"),
-    }
-    
-    CONTROLLED_POPUPS = list(POPUP_PHASE_MAP.keys())
+    CONTROLLED_POPUPS = [
+        "免责声明！",           # showinfo
+        "自动连接失败",         # askokcancel (MuMu/雷电)
+        "助战排序不符合",       # askyesno
+        "队伍配置错误！",       # askokcancel
+        "正在结束任务！",       # showwarning
+        "脚本停止！",           # showwarning
+        "其他任务运行中",       # showwarning
+        "自动关机中！"          # askyesno
+    ]
     
     def create_popup_wrapper(func_name, original_func):
         def wrapper(title, message, **kwargs):
@@ -147,60 +142,51 @@ def start_tcp_server(bb_window, port=25001):
                 except:
                     return s
             
-            # 获取阶段信息
-            phase = "UNKNOWN"
-            sub_phase = "UNKNOWN"
-            for keyword, (ph, sub_ph) in POPUP_PHASE_MAP.items():
-                if keyword in title:
-                    phase = ph
-                    sub_phase = sub_ph
-                    break
-            
-            # 更新当前阶段
-            global _current_phase, _current_sub_phase
-            with _phase_lock:
-                prev_phase = _current_phase
-                prev_sub_phase = _current_sub_phase
-                _current_phase = phase
-                _current_sub_phase = sub_phase
-            
-            # [1] 广播阶段进入 (如果有前一个阶段，先广播退出)
-            if prev_phase:
-                exit_data = {
-                    'type': 'phase_exit',
-                    'phase': prev_phase,
-                    'sub_phase': prev_sub_phase
-                }
-                _broadcast_to_clients(exit_data)
-                log_to_file(f"[Phase] EXIT {prev_phase}/{prev_sub_phase}")
-            
-            enter_data = {
-                'type': 'phase_enter',
-                'phase': phase,
-                'sub_phase': sub_phase,
-                'popup_title': fix_encoding(title)
-            }
-            _broadcast_to_clients(enter_data)
-            log_to_file(f"[Phase] ENTER {phase}/{sub_phase}")
-            
-            # [2] 广播弹窗
             popup_data = {
                 'type': 'popup',
                 'id': popup_id,
                 'popup_type': func_name,
                 'title': fix_encoding(title),
-                'message': fix_encoding(message),
-                'phase': phase,
-                'sub_phase': sub_phase
+                'message': fix_encoding(message)
             }
             popup_event_queue.put(popup_data)
             log_to_file(f"[Popup] {title}")
+            
+            # TCP 广播
             _broadcast_to_clients(popup_data)
             
-            return create_controlled_dialog(func_name, title, message, popup_id, phase, sub_phase, original_func, **kwargs)
+            # 免责声明：延迟2秒后自动确认
+            if '免责声明' in title:
+                def auto_disclaimer():
+                    time.sleep(2)
+                    _resolve_popup(popup_id, 'ok')
+                    log_to_file("[Auto] 免责声明已自动确认")
+                threading.Thread(target=auto_disclaimer, daemon=True).start()
+            
+            # 助战排序不符合：根据参数处理
+            elif '助战排序不符合' in title:
+                def auto_assist():
+                    time.sleep(0.5)
+                    support_continue = _current_task_args.get('support_order_mismatch', True)
+                    action = 'yes' if support_continue else 'no'
+                    _resolve_popup(popup_id, action)
+                    log_to_file(f"[Auto] 助战排序已自动处理: {action}")
+                threading.Thread(target=auto_assist, daemon=True).start()
+            
+            # 队伍配置错误：根据参数处理
+            elif '队伍配置错误' in title:
+                def auto_team():
+                    time.sleep(0.5)
+                    team_continue = _current_task_args.get('team_config_error', True)
+                    action = 'ok' if team_continue else 'cancel'
+                    _resolve_popup(popup_id, action)
+                    log_to_file(f"[Auto] 队伍配置已自动处理: {action}")
+                threading.Thread(target=auto_team, daemon=True).start()
+            
+            return create_controlled_dialog(func_name, title, message, popup_id, original_func, **kwargs)
         return wrapper
     
-    def create_controlled_dialog(func_name, title, message, popup_id, phase, sub_phase, original_func, **kwargs):
+    def create_controlled_dialog(func_name, title, message, popup_id, original_func, **kwargs):
         import threading
         import time
         import ctypes
@@ -211,6 +197,8 @@ def start_tcp_server(bb_window, port=25001):
         popup_data = {'value': None, 'resolved': False}
         
         def monitor():
+            # 免责声明也走外部决策流程，不再自动关闭
+            
             while not popup_data['resolved']:
                 with _popup_wait_lock:
                     info = _popup_wait_dict.get(popup_id)
@@ -229,6 +217,7 @@ def start_tcp_server(bb_window, port=25001):
             for _ in range(30):
                 hwnd = user32.FindWindowW(None, title)
                 if not hwnd:
+                    # 弹窗已关闭
                     log_to_file(f"[Popup] 弹窗已确认关闭: {title}")
                     break
                 time.sleep(0.1)
@@ -236,32 +225,15 @@ def start_tcp_server(bb_window, port=25001):
             # 从队列移除
             _remove_popup_from_queue(popup_id)
             
-            # [3] 推送弹窗已关闭
+            # 推送弹窗已关闭的信息给所有客户端
             close_notify = {
                 'type': 'popup_closed',
                 'id': popup_id,
                 'title': title,
-                'result': popup_data['value'],
-                'phase': phase,
-                'sub_phase': sub_phase
+                'result': popup_data['value']
             }
             _broadcast_to_clients(close_notify)
-            log_to_file(f"[Popup] CLOSED {title}")
-            
-            # [4] 广播阶段退出
-            exit_data = {
-                'type': 'phase_exit',
-                'phase': phase,
-                'sub_phase': sub_phase
-            }
-            _broadcast_to_clients(exit_data)
-            log_to_file(f"[Phase] EXIT {phase}/{sub_phase}")
-            
-            # 清除当前阶段
-            global _current_phase, _current_sub_phase
-            with _phase_lock:
-                _current_phase = None
-                _current_sub_phase = None
+            log_to_file(f"[TCP] 弹窗关闭通知已广播: {popup_id}")
             
             # 免责声明关闭后，导入模块
             if "免责声明" in title:
@@ -346,109 +318,36 @@ def start_tcp_server(bb_window, port=25001):
                 pass
             log_to_file(f"[TCP] Client disconnected: {addr}")
     
-def _patch_battle_setattr(Battle):
-    """拦截 Battle.__setattr__，stage 变化时立即主动推送阶段通知"""
-    original_setattr = Battle.__setattr__
-    
-    def new_setattr(self, name, value):
-        # 先执行原赋值
-        original_setattr(self, name, value)
+    def ensure_imports():
+        """确保模块已导入（延迟导入，避免在免责声明前初始化）"""
+        global CT, Battle, Windows, LDdevice, Mumudevice
+        if CT is not None:
+            return
         
-        # stage 变化时立即推送阶段通知
-        if name == 'stage':
-            stage_map = {
-                0: ('PRE_BATTLE', 'ASSIST_SELECT'),
-                1: ('PRE_BATTLE', 'TEAM_CONFIG'),
-                2: ('PRE_BATTLE', 'LOADING'),
-                3: ('RUNNING', 'BATTLE')
-            }
-            phase, sub_phase = stage_map.get(value, (None, None))
-            
-            state_data = {
-                'type': 'state_change',
-                'source': 'battle.stage',
-                'stage': value,
-                'phase': phase,
-                'sub_phase': sub_phase
-            }
-            _broadcast_to_clients(state_data)
-            log_to_file(f"[State] stage={value}, phase={phase}/{sub_phase}")
-    
-    Battle.__setattr__ = new_setattr
-    log_to_file("[Patch] Battle.__setattr__ patched for stage push")
-
-
-def _patch_device_setattr(DeviceClass):
-    """拦截 Device 类 __setattr__，连接状态变化时立即主动推送"""
-    original_setattr = DeviceClass.__setattr__
-    
-    def new_setattr(self, name, value):
-        # 先执行原赋值
-        original_setattr(self, name, value)
+        try:
+            from consts import Consts as CT
+            log_to_file("[Import] CT imported")
+        except Exception as e:
+            log_to_file(f"[Import Warning] CT: {e}")
+            class MockCT:
+                Gold = "gold"; Silver = "silver"; Copper = "copper"
+                Blue = "blue"; Colorful = "colorful"
+                BATTLE_TYPE = ['连续出击(或强化本)', '自动编队爬塔(应用操作序列设置)']
+            CT = MockCT()
         
-        # available 变化时立即推送连接状态
-        if name == 'available':
-            state_data = {
-                'type': 'state_change',
-                'source': 'device.available',
-                'available': value
-            }
-            _broadcast_to_clients(state_data)
-            log_to_file(f"[State] device.available={value}")
+        try:
+            from device import Windows, LDdevice, Mumudevice
+            log_to_file("[Import] device imported")
+        except Exception as e:
+            log_to_file(f"[Import Warning] device: {e}")
         
-        # running 变化时立即推送运行状态
-        elif name == 'running':
-            state_data = {
-                'type': 'state_change',
-                'source': 'device.running',
-                'running': value
-            }
-            _broadcast_to_clients(state_data)
-            log_to_file(f"[State] device.running={value}")
+        try:
+            from FGObattle import Battle
+            log_to_file("[Import] Battle imported")
+        except Exception as e:
+            log_to_file(f"[Import Warning] Battle: {e}")
     
-    DeviceClass.__setattr__ = new_setattr
-    log_to_file(f"[Patch] {DeviceClass.__name__}.__setattr__ patched for state push")
-
-def ensure_imports():
-    """确保模块已导入（延迟导入，避免在免责声明前初始化）"""
-    global CT, Battle, Windows, LDdevice, Mumudevice
-    if CT is not None:
-        return
-    
-    try:
-        from consts import Consts as CT
-        log_to_file("[Import] CT imported")
-    except Exception as e:
-        log_to_file(f"[Import Warning] CT: {e}")
-        class MockCT:
-            Gold = "gold"; Silver = "silver"; Copper = "copper"
-            Blue = "blue"; Colorful = "colorful"
-            BATTLE_TYPE = ['连续出击(或强化本)', '自动编队爬塔(应用操作序列设置)']
-        CT = MockCT()
-    
-    try:
-        from device import Windows, LDdevice, Mumudevice
-        log_to_file("[Import] device imported")
-    except Exception as e:
-        log_to_file(f"[Import Warning] device: {e}")
-    
-    try:
-        from FGObattle import Battle
-        log_to_file("[Import] Battle imported")
-        # 应用属性拦截补丁，实现主动推送
-        _patch_battle_setattr(Battle)
-    except Exception as e:
-        log_to_file(f"[Import Warning] Battle: {e}")
-            
-    try:
-        from device import FGOdevice
-        # 应用 FGOdevice 属性拦截补丁（running 和 available）
-        _patch_device_setattr(FGOdevice)
-        log_to_file("[Patch] FGOdevice patched for state push")
-    except Exception as e:
-        log_to_file(f"[Import Warning] FGOdevice patch: {e}")
-
-def handle_command(cmd):
+    def handle_command(cmd):
         """处理命令"""
         ensure_imports()
         log_to_file(f"[API] handle_command raw: {cmd}, type={type(cmd)}")
@@ -520,31 +419,8 @@ def handle_command(cmd):
                 return {'success': True}
             
             elif command == 'get_status':
-                # 获取设备连接状态
-                device_status = {
-                    'connected': False,
-                    'type': None,
-                    'name': None
-                }
-                
-                if _bb_window_global and hasattr(_bb_window_global, 'pages'):
-                    try:
-                        page = _bb_window_global.pages.get(_bb_window_global.showingPage)
-                        if page and hasattr(page, 'device'):
-                            device = page.device
-                            device_status['connected'] = getattr(device, 'available', False)
-                            device_status['type'] = getattr(device, 'type_', None)
-                            device_status['name'] = getattr(device, 'name', None)
-                    except:
-                        pass
-                
                 return {
                     'success': True,
-                    'connected': device_status['connected'],
-                    'device_type': device_status['type'],
-                    'device_name': device_status['name'],
-                    'current_phase': _current_phase,
-                    'current_sub_phase': _current_sub_phase,
                     'popup_queue': popup_event_queue.qsize() if popup_event_queue else 0
                 }
             
@@ -593,6 +469,11 @@ def handle_command(cmd):
                     else:
                         return {'success': False, 'message': 'Popup not found or resolved'}
             
+            elif command == 'run_bbc_task':
+                # 执行完整BBC任务流程
+                result = api_run_bbc_task(args)
+                return result
+            
             else:
                 return {'success': False, 'error': f'Unknown command: {command}'}
                 
@@ -600,25 +481,25 @@ def handle_command(cmd):
             import traceback
             log_to_file(f"[Command Error] {command}: {e}")
             return {'success': False, 'error': str(e), 'traceback': traceback.format_exc()}
-
-def run_server():
-    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    sock.bind(('127.0.0.1', port))
-    sock.listen(5)
-    tcp_server_instance = sock
-    print(f"[TCP-Server] Started on 127.0.0.1:{port}")
-    log_to_file(f"[TCP-Server] Started on port {port}")
     
-    while True:
-        try:
-            client, addr = sock.accept()
-            threading.Thread(target=handle_client, args=(client, addr), daemon=True).start()
-        except Exception as e:
-            log_to_file(f"[TCP] Server error: {e}")
-            break
-
-threading.Thread(target=run_server, daemon=True).start()
+    def run_server():
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        sock.bind(('127.0.0.1', port))
+        sock.listen(5)
+        tcp_server_instance = sock
+        print(f"[TCP-Server] Started on 127.0.0.1:{port}")
+        log_to_file(f"[TCP-Server] Started on port {port}")
+        
+        while True:
+            try:
+                client, addr = sock.accept()
+                threading.Thread(target=handle_client, args=(client, addr), daemon=True).start()
+            except Exception as e:
+                log_to_file(f"[TCP] Server error: {e}")
+                break
+    
+    threading.Thread(target=run_server, daemon=True).start()
 
 
 # ==================== API Functions ====================
@@ -856,6 +737,107 @@ def api_start_battle(page):
     except Exception as e:
         log_to_file(f"[API Error] Start battle: {e}")
         return False
+
+def api_run_bbc_task(args):
+    """执行完整BBC任务流程"""
+    import time
+    global _current_task_args
+    
+    team_config = args.get('team_config', '')
+    run_count = args.get('run_count', 1)
+    apple_type = args.get('apple_type', 'gold')
+    battle_type = args.get('battle_type', 'continuous')
+    connect = args.get('connect', 'auto')
+    support_order_mismatch = args.get('support_order_mismatch', False)
+    team_config_error = args.get('team_config_error', False)
+    mumu_path = args.get('mumu_path', '')
+    mumu_index = args.get('mumu_index', 0)
+    ld_path = args.get('ld_path', '')
+    ld_index = args.get('ld_index', 0)
+    manual_port = args.get('manual_port', '')
+    
+    # 保存参数到全局变量，供弹窗处理使用
+    _current_task_args = {
+        'support_order_mismatch': support_order_mismatch,
+        'team_config_error': team_config_error
+    }
+    
+    log_to_file(f"[Task] 开始执行BBC任务: config={team_config}, count={run_count}")
+    
+    # 等待免责声明关闭（自动处理，最多等5秒）
+    log_to_file("[Task] 等待免责声明...")
+    time.sleep(3)
+    
+    # 执行连接
+    if connect == 'mumu' and mumu_path:
+        log_to_file("[Task] 连接MuMu模拟器...")
+        if not api_connect_mumu(_bb_window_global, type('Args', (), {
+            'path': mumu_path, 'index': mumu_index
+        })()):
+            return {'success': False, 'reason': 'mumu_connect_failed'}
+    elif connect == 'ldplayer' and ld_path:
+        log_to_file("[Task] 连接雷电模拟器...")
+        if not api_connect_ld(_bb_window_global, type('Args', (), {
+            'path': ld_path, 'index': ld_index
+        })()):
+            return {'success': False, 'reason': 'ldplayer_connect_failed'}
+    elif connect == 'manual' and manual_port:
+        log_to_file("[Task] 连接ADB...")
+        if not api_connect_adb(_bb_window_global, type('Args', (), {
+            'ip': manual_port
+        })()):
+            return {'success': False, 'reason': 'adb_connect_failed'}
+    
+    # 等待连接完成
+    time.sleep(1)
+    
+    # 加载配置
+    log_to_file(f"[Task] 加载配置: {team_config}")
+    if not api_load_config(_bb_window_global, team_config):
+        return {'success': False, 'reason': 'config_load_failed'}
+    
+    # 设置参数
+    page = _bb_window_global.pages[0]
+    api_set_run_times(page, run_count)
+    api_set_apple_type(page, apple_type)
+    api_set_battle_type(page, battle_type)
+    
+    # 启动战斗
+    log_to_file("[Task] 启动战斗...")
+    if not api_start_battle(page):
+        return {'success': False, 'reason': 'start_battle_failed'}
+    
+    # 轮询等待战斗结束
+    log_to_file("[Task] 等待战斗结束...")
+    max_wait = 3600 * 24  # 最长等待24小时
+    waited = 0
+    while waited < max_wait:
+        # 检查是否有结束弹窗
+        # 通过检查popup队列中是否有停止相关弹窗
+        temp_list = []
+        battle_ended = False
+        end_reason = ''
+        while not popup_event_queue.empty():
+            try:
+                p = popup_event_queue.get_nowait()
+                temp_list.append(p)
+                title = p.get('title', '')
+                if '脚本停止！' in title or '正在结束任务！' in title:
+                    battle_ended = True
+                    end_reason = p.get('message', '')
+            except:
+                break
+        for p in temp_list:
+            popup_event_queue.put(p)
+        
+        if battle_ended:
+            log_to_file(f"[Task] 战斗结束: {end_reason}")
+            return {'success': True, 'reason': 'completed', 'detail': end_reason}
+        
+        time.sleep(1)
+        waited += 1
+    
+    return {'success': False, 'reason': 'timeout'}
 
 def log_to_file(msg):
     """写入日志"""
