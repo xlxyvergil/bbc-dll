@@ -346,78 +346,78 @@ def start_tcp_server(bb_window, port=25001):
                 pass
             log_to_file(f"[TCP] Client disconnected: {addr}")
     
-def _start_state_monitor():
-    """启动状态监控线程，主动推送状态变化"""
-    import threading
-    import time
+def _patch_battle_setattr(Battle):
+    """拦截 Battle.__setattr__，属性变化时立即主动推送"""
+    original_setattr = Battle.__setattr__
     
-    def monitor():
-        last_state = {
-            'stage': None,
-            'running': None,
-            'device_available': None,
-            'device_running': None
-        }
+    def new_setattr(self, name, value):
+        # 先执行原赋值
+        original_setattr(self, name, value)
         
-        while True:
-            try:
-                if _bb_window_global:
-                    page = _bb_window_global.pages.get(_bb_window_global.showingPage)
-                    if page:
-                        # 读取 Battle 状态
-                        battle = getattr(page, 'bb', None)
-                        battle_stage = getattr(battle, 'stage', None) if battle else None
-                        battle_running = getattr(battle, 'running', None) if battle else None
-                        
-                        # 读取 Device 状态
-                        device = getattr(page, 'device', None)
-                        device_available = getattr(device, 'available', None) if device else None
-                        device_running = getattr(device, 'running', None) if device else None
-                        
-                        current = {
-                            'stage': battle_stage,
-                            'running': battle_running,
-                            'device_available': device_available,
-                            'device_running': device_running
-                        }
-                        
-                        # 检测变化
-                        if current != last_state:
-                            # 阶段映射
-                            stage_map = {
-                                0: ('PRE_BATTLE', 'ASSIST_SELECT'),
-                                1: ('PRE_BATTLE', 'TEAM_CONFIG'),
-                                2: ('PRE_BATTLE', 'LOADING'),
-                                3: ('RUNNING', 'BATTLE')
-                            }
-                            phase, sub_phase = stage_map.get(battle_stage, (None, None))
-                            
-                            # 推送状态变更
-                            state_data = {
-                                'type': 'state_update',
-                                'timestamp': time.time(),
-                                'battle': {
-                                    'stage': battle_stage,
-                                    'phase': phase,
-                                    'sub_phase': sub_phase,
-                                    'running': battle_running
-                                },
-                                'device': {
-                                    'available': device_available,
-                                    'running': device_running
-                                }
-                            }
-                            _broadcast_to_clients(state_data)
-                            log_to_file(f"[State] stage={battle_stage}, running={battle_running}, device={device_available}")
-                            
-                            last_state = current.copy()
-            except Exception as e:
-                log_to_file(f"[State Monitor] Error: {e}")
+        # stage 变化时立即推送阶段通知
+        if name == 'stage':
+            stage_map = {
+                0: ('PRE_BATTLE', 'ASSIST_SELECT'),
+                1: ('PRE_BATTLE', 'TEAM_CONFIG'),
+                2: ('PRE_BATTLE', 'LOADING'),
+                3: ('RUNNING', 'BATTLE')
+            }
+            phase, sub_phase = stage_map.get(value, (None, None))
             
-            time.sleep(0.3)  # 300ms 检测一次
+            state_data = {
+                'type': 'state_change',
+                'source': 'battle.stage',
+                'stage': value,
+                'phase': phase,
+                'sub_phase': sub_phase
+            }
+            _broadcast_to_clients(state_data)
+            log_to_file(f"[State] stage={value}, phase={phase}/{sub_phase}")
+        
+        # running 变化时立即推送运行状态
+        elif name == 'running':
+            state_data = {
+                'type': 'state_change',
+                'source': 'battle.running',
+                'running': value
+            }
+            _broadcast_to_clients(state_data)
+            log_to_file(f"[State] battle.running={value}")
     
-    threading.Thread(target=monitor, daemon=True).start()
-    log_to_file("[State Monitor] Started")
+    Battle.__setattr__ = new_setattr
+    log_to_file("[Patch] Battle.__setattr__ patched for state push")
+
+
+def _patch_device_setattr(DeviceClass):
+    """拦截 Device 类 __setattr__，连接状态变化时立即主动推送"""
+    original_setattr = DeviceClass.__setattr__
+    
+    def new_setattr(self, name, value):
+        # 先执行原赋值
+        original_setattr(self, name, value)
+        
+        # available 变化时立即推送连接状态
+        if name == 'available':
+            state_data = {
+                'type': 'state_change',
+                'source': 'device.available',
+                'available': value
+            }
+            _broadcast_to_clients(state_data)
+            log_to_file(f"[State] device.available={value}")
+        
+        # running 变化时立即推送运行状态
+        elif name == 'running':
+            state_data = {
+                'type': 'state_change',
+                'source': 'device.running',
+                'running': value
+            }
+            _broadcast_to_clients(state_data)
+            log_to_file(f"[State] device.running={value}")
+    
+    DeviceClass.__setattr__ = new_setattr
+    log_to_file(f"[Patch] {DeviceClass.__name__}.__setattr__ patched for state push")
 
 def ensure_imports():
     """确保模块已导入（延迟导入，避免在免责声明前初始化）"""
@@ -445,10 +445,20 @@ def ensure_imports():
     try:
         from FGObattle import Battle
         log_to_file("[Import] Battle imported")
-        # 启动状态监控线程
-        _start_state_monitor()
+        # 应用属性拦截补丁，实现主动推送
+        _patch_battle_setattr(Battle)
     except Exception as e:
         log_to_file(f"[Import Warning] Battle: {e}")
+            
+    try:
+        from device import Windows, LDdevice, Mumudevice
+        # 应用设备类属性拦截补丁
+        _patch_device_setattr(Windows)
+        _patch_device_setattr(LDdevice)
+        _patch_device_setattr(Mumudevice)
+        log_to_file("[Patch] Device classes patched for state push")
+    except Exception as e:
+        log_to_file(f"[Import Warning] device patch: {e}")
 
 def handle_command(cmd):
         """处理命令"""
