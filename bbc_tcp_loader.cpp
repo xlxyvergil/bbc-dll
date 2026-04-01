@@ -53,7 +53,17 @@ void InitPython() {
     fflush(log);
     
     // 延迟初始化，等待 PyInstaller 完全启动
-    Sleep(100); // 等待 100ms，确保 Python 环境就绪
+    // PyInstaller 需要时间来设置 sys._MEIPASS 和初始化 Python
+    Sleep(500); // 等待 500ms，确保 Python 环境就绪
+    
+    // 再检查一次，如果 Python 仍未初始化，再等待
+    for (int i = 0; i < 10; i++) {
+        HMODULE hPythonTest = GetModuleHandleW(L"python36.dll");
+        if (hPythonTest) {
+            break;
+        }
+        Sleep(200);
+    }
     
     fprintf(log, "[1] Starting injection...\n");
     fflush(log);
@@ -83,8 +93,28 @@ void InitPython() {
         fflush(log);
     }
     
-    // 加载 Python36.dll
-    HMODULE hPython = LoadLibraryW(L"python36.dll");
+    // 获取已加载的 Python36.dll（PyInstaller 应该已经加载）
+    HMODULE hPython = GetModuleHandleW(L"python36.dll");
+    if (!hPython) {
+        // 如果还没加载，尝试从 EXE 所在目录加载
+        wchar_t exePath[MAX_PATH];
+        GetModuleFileNameW(NULL, exePath, MAX_PATH);
+        wchar_t* lastBackslash = wcsrchr(exePath, L'\\');
+        if (lastBackslash) {
+            *lastBackslash = L'\0';
+        }
+        
+        wchar_t pythonDllPath[MAX_PATH];
+        wcscpy_s(pythonDllPath, MAX_PATH, exePath);
+        wcscat_s(pythonDllPath, MAX_PATH, L"\\python36.dll");
+        
+        hPython = LoadLibraryW(pythonDllPath);
+        if (!hPython) {
+            // 最后尝试从 DLL 所在目录加载
+            hPython = LoadLibraryW(L"python36.dll");
+        }
+    }
+    
     if (!hPython) {
         if (log) {
             fwprintf(log, L"[ERROR] Failed to load python36.dll\n");
@@ -99,11 +129,17 @@ void InitPython() {
     }
     
     // 获取 Python API
+    typedef void (*Py_InitializeFunc)(void);
+    typedef int (*Py_IsInitializedFunc)(void);
+    typedef void (*Py_SetPythonHomeFunc)(const wchar_t*);
     typedef int (*PyRun_SimpleStringFunc)(const char*);
     typedef void* (*PyImport_ImportModuleFunc)(const char*);
     typedef void* (*PyGILState_EnsureFunc)(void);
     typedef void (*PyGILState_ReleaseFunc)(void*);
     
+    Py_InitializeFunc Py_Initialize = (Py_InitializeFunc)GetProcAddress(hPython, "Py_Initialize");
+    Py_IsInitializedFunc Py_IsInitialized = (Py_IsInitializedFunc)GetProcAddress(hPython, "Py_IsInitialized");
+    Py_SetPythonHomeFunc Py_SetPythonHome = (Py_SetPythonHomeFunc)GetProcAddress(hPython, "Py_SetPythonHome");
     PyRun_SimpleStringFunc PyRun_SimpleString = (PyRun_SimpleStringFunc)GetProcAddress(hPython, "PyRun_SimpleString");
     PyImport_ImportModuleFunc PyImport_ImportModule = (PyImport_ImportModuleFunc)GetProcAddress(hPython, "PyImport_ImportModule");
     PyGILState_EnsureFunc PyGILState_Ensure = (PyGILState_EnsureFunc)GetProcAddress(hPython, "PyGILState_Ensure");
@@ -116,6 +152,13 @@ void InitPython() {
         }
         FreeLibrary(hPython);
         return;
+    }
+    
+    // 初始化 Python 解释器（如果尚未初始化）
+    if (Py_IsInitialized && Py_IsInitialized()) {
+        fwprintf(log, L"[3.1] Python already initialized by PyInstaller\n");
+    } else {
+        fwprintf(log, L"[3.1] Python not initialized, skipping initialization (should be done by PyInstaller)\n");
     }
     
     if (log) {
