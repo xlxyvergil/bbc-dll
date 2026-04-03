@@ -30,9 +30,6 @@ void InitPython() {
         *lastBackslash = L'\0';
     }
     
-    // 日志功能已禁用，避免影响 BBC 启动
-    FILE* log = nullptr;
-    
     // 延迟初始化，等待 PyInstaller 完全启动
     // PyInstaller 需要时间来设置 sys._MEIPASS 和初始化 Python
     Sleep(500); // 等待 500ms，确保 Python 环境就绪
@@ -50,10 +47,6 @@ void InitPython() {
     wchar_t scriptPath[MAX_PATH];
     wcscpy_s(scriptPath, MAX_PATH, dllPath);
     wcscat_s(scriptPath, MAX_PATH, L"\\bbc_tcp_server.py");
-    
-    fprintf(log, "[2] Script path: %S\n", scriptPath);
-    fprintf(log, "[2] Script path length: %zu\n", wcslen(scriptPath));
-    fflush(log);
     
     // 检查文件是否存在
     if (GetFileAttributesW(scriptPath) == INVALID_FILE_ATTRIBUTES) {
