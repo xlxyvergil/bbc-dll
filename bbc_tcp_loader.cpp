@@ -30,27 +30,8 @@ void InitPython() {
         *lastBackslash = L'\0';
     }
     
-    // 创建日志文件 - 使用 DLL 所在目录
-    wchar_t logPath[MAX_PATH];
-    wcscpy_s(logPath, MAX_PATH, dllPath);
-    wcscat_s(logPath, MAX_PATH, L"\\bbc_tcp_injection.log");
-    
+    // 日志功能已禁用，避免影响 BBC 启动
     FILE* log = nullptr;
-    _wfopen_s(&log, logPath, L"a, ccs=UTF-8");
-    if (!log) {
-        return;
-    }
-    
-    fwprintf(log, L"\n=== BBC TCP Injection Started ===\n");
-    fwprintf(log, L"MAX_PATH constant: %d\n", MAX_PATH);
-    
-    wchar_t testPath[MAX_PATH];
-    DWORD testLen = GetModuleFileNameW(NULL, testPath, MAX_PATH);
-    fwprintf(log, L"EXE Path (len=%lu): %S\n", testLen, testPath);
-    
-    fwprintf(log, L"DLL Path: %S\n", dllPath);
-    fwprintf(log, L"DLL Path length: %zu\n", wcslen(dllPath));
-    fflush(log);
     
     // 延迟初始化，等待 PyInstaller 完全启动
     // PyInstaller 需要时间来设置 sys._MEIPASS 和初始化 Python
@@ -65,9 +46,6 @@ void InitPython() {
         Sleep(200);
     }
     
-    fprintf(log, "[1] Starting injection...\n");
-    fflush(log);
-    
     // 使用 DLL 所在目录构建 bbc_tcp_server.py 路径
     wchar_t scriptPath[MAX_PATH];
     wcscpy_s(scriptPath, MAX_PATH, dllPath);
@@ -79,18 +57,7 @@ void InitPython() {
     
     // 检查文件是否存在
     if (GetFileAttributesW(scriptPath) == INVALID_FILE_ATTRIBUTES) {
-        DWORD err = GetLastError();
-        if (log) {
-            fwprintf(log, L"[ERROR] GetFileAttributes failed for: %s\n", scriptPath);
-            fwprintf(log, L"[ERROR] Error code: %lu\n", err);
-            fclose(log);
-        }
         return;
-    }
-    
-    if (log) {
-        fwprintf(log, L"[2] Found bbc_tcp_server.py: %s\n", scriptPath);
-        fflush(log);
     }
     
     // 获取已加载的 Python36.dll（PyInstaller 应该已经加载）
@@ -116,16 +83,7 @@ void InitPython() {
     }
     
     if (!hPython) {
-        if (log) {
-            fwprintf(log, L"[ERROR] Failed to load python36.dll\n");
-            fclose(log);
-        }
         return;
-    }
-    
-    if (log) {
-        fwprintf(log, L"[3] Loaded python36.dll at %p\n", hPython);
-        fflush(log);
     }
     
     // 获取 Python API
@@ -146,40 +104,13 @@ void InitPython() {
     PyGILState_ReleaseFunc PyGILState_Release = (PyGILState_ReleaseFunc)GetProcAddress(hPython, "PyGILState_Release");
     
     if (!PyRun_SimpleString) {
-        if (log) {
-            fwprintf(log, L"[ERROR] Failed to get PyRun_SimpleString\n");
-            fclose(log);
-        }
-        FreeLibrary(hPython);
         return;
-    }
-    
-    // 初始化 Python 解释器（如果尚未初始化）
-    if (Py_IsInitialized && Py_IsInitialized()) {
-        fwprintf(log, L"[3.1] Python already initialized by PyInstaller\n");
-    } else {
-        fwprintf(log, L"[3.1] Python not initialized, skipping initialization (should be done by PyInstaller)\n");
-    }
-    
-    if (log) {
-        fwprintf(log, L"[4] Python API ready, PyGILState_Ensure=%p\n", PyGILState_Ensure);
-        fflush(log);
     }
     
     // 获取 GIL
     void* gil_state = NULL;
     if (PyGILState_Ensure) {
         gil_state = PyGILState_Ensure();
-        if (log) {
-            fwprintf(log, L"[4.5] GIL acquired\n");
-            fflush(log);
-        }
-    }
-    
-    // 启动 BBC TCP Server
-    if (log) {
-        fwprintf(log, L"[5.1] Starting BBC TCP Server...\n");
-        fflush(log);
     }
     
     const char* server_code = 
@@ -219,25 +150,11 @@ void InitPython() {
         "t.start()\n"
         "print('[BBC-TCP] Server thread started')\n";
     
-    int result = PyRun_SimpleString(server_code);
-    
-    if (log) {
-        fwprintf(log, L"[5.2] Server code returned: %d\n", result);
-        fflush(log);
-    }
+    PyRun_SimpleString(server_code);
     
     // 释放 GIL
     if (PyGILState_Release && gil_state) {
         PyGILState_Release(gil_state);
-        if (log) {
-            fwprintf(log, L"[5.5] GIL released\n");
-            fflush(log);
-        }
-    }
-    
-    if (log) {
-        fwprintf(log, L"=== BBC TCP Injection Complete ===\n\n");
-        fclose(log);
     }
 }
 

@@ -853,13 +853,5 @@ def _resolve_popup(popup_id, action):
             popup_info['status'] = 'resolved'
 
 def log_to_file(msg):
-    """写入日志"""
-    try:
-        import os
-        from datetime import datetime
-        log_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'bbc_tcp_server.log')
-        with open(log_path, 'a', encoding='utf-8') as f:
-            f.write(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}\n")
-            f.flush()
-    except:
-        pass
+    """写入日志（已禁用，避免影响 BBC 启动）"""
+    pass
