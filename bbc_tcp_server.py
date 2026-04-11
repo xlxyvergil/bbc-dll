@@ -208,13 +208,9 @@ def start_tcp_server(bb_window, port=25001):
             
             # 弹窗关闭通知功能已移除
             
-            # 免责声明关闭后，导入模块并设置服务器版本
+            # 免责声明关闭后，导入模块
             if "免责声明" in title:
                 ensure_imports()
-                # 设置服务器版本（如果提供了参数）
-                server_version = _current_task_args.get('server_version')
-                if server_version and _bb_window_global is not None:
-                    api_set_server_version(_bb_window_global, server_version)
         
         t = threading.Thread(target=monitor, daemon=True)
         t.start()
@@ -525,13 +521,14 @@ def api_set_apple_type(page, apple_type):
     
     if apple_type in apple_map:
         page.appleSet.appleType = apple_map[apple_type]
+        # 尝试更新UI图标（如果属性存在）
         try:
-            page.appleSet.appleIconPhoto = page.appleSet.getAppleIconPhoto()
-            page.appleSet.appleIcon.config(image=page.appleSet.appleIconPhoto)
-            print(f"[API] 苹果类型已设置: {apple_type}")
+            if hasattr(page.appleSet, 'appleIcon') and hasattr(page.appleSet, 'getAppleIconPhoto'):
+                page.appleSet.appleIconPhoto = page.appleSet.getAppleIconPhoto()
+                page.appleSet.appleIcon.config(image=page.appleSet.appleIconPhoto)
         except Exception as e:
-            print(f"[API警告] 苹果类型已设置但UI更新失败: {e}")
-            print(f"[API] 苹果类型已设置: {apple_type}")
+            pass  # UI更新失败不影响功能
+        print(f"[API] 苹果类型已设置: {apple_type}")
 
 def api_set_run_times(page, times):
     """设置运行次数"""
@@ -547,44 +544,6 @@ def api_set_battle_type(page, battle_type):
     elif battle_type == "single":
         page.battletype.set(CT.BATTLE_TYPE[1])
         print("[API] 战斗类型: 单次")
-
-def api_set_server_version(bb, server_version):
-    """设置服务器版本
-    
-    Args:
-        bb: BBchannel主窗口对象
-        server_version: 服务器版本代码 ('CH', 'CNTW', 'JP')
-    """
-    try:
-        page = bb.pages[0]
-        
-        # 验证服务器版本参数
-        valid_servers = {'CH': '简中服', 'CNTW': '繁中服', 'JP': '日语服'}
-        if server_version not in valid_servers:
-            print(f"[API警告] 无效的服务器版本: {server_version}，使用默认值 CH")
-            server_version = 'CH'
-        
-        # 设置页面服务器版本
-        page.SS['server'] = server_version
-        
-        # 更新UI显示（如果存在）
-        if hasattr(page, 'server') and hasattr(page.server, 'set'):
-            page.server.set(valid_servers[server_version])
-        
-        # 刷新页面标签显示
-        if hasattr(bb, 'pagebar') and hasattr(bb.pagebar, 'tags'):
-            try:
-                bb.pagebar.tags[page.idx].createText(True)
-            except Exception as e:
-                print(f"[API警告] 页面标签更新失败: {e}")
-        
-        print(f"[API] 服务器版本已设置: {valid_servers[server_version]} ({server_version})")
-        return True
-    except Exception as e:
-        print(f"[API错误] 服务器版本设置失败: {e}")
-        import traceback
-        traceback.print_exc()
-        return False
 
 def api_load_config(bb, filename):
     """加载队伍配置文件（从第4步开始：直接应用配置）"""
@@ -603,10 +562,11 @@ def api_load_config(bb, filename):
         with open(config_path, "r", encoding="utf8") as fp:
             SS = json.load(fp)
         
-        # 3. 保留当前连接信息
+        # 3. 保留当前连接信息和服务器版本
         SS["connectMode"] = page.SS.get("connectMode", None)
         SS["snapshotDevice"] = page.SS.get("snapshotDevice", None)
         SS["operateDevice"] = page.SS.get("operateDevice", None)
+        SS["server"] = page.SS.get("server", "CH")  # 保留当前服务器版本
         
         # 4. 应用配置
         page.SS = SS
@@ -762,8 +722,7 @@ def api_run_bbc_task(args):
     # 保存参数到全局变量，供弹窗处理使用
     _current_task_args = {
         'support_order_mismatch': support_order_mismatch,
-        'team_config_error': team_config_error,
-        'server_version': server_version
+        'team_config_error': team_config_error
     }
     
     # 等待免责声明关闭（自动处理，等待足够时间）
@@ -814,7 +773,21 @@ def api_run_bbc_task(args):
             'error': f'配置文件加载失败: {team_config}'
         }
     
-    # 设置参数
+    # 设置服务器版本（在加载配置之后，避免被覆盖）
+    try:
+        page = _bb_window_global.pages[0]
+        valid_servers = {'CH': '简中服', 'CNTW': '繁中服', 'JP': '日语服'}
+        if server_version not in valid_servers:
+            server_version = 'CH'
+        page.SS['server'] = server_version
+        # 刷新页面标签
+        if hasattr(_bb_window_global, 'pagebar') and hasattr(_bb_window_global.pagebar, 'tags'):
+            _bb_window_global.pagebar.tags[page.idx].createText(True)
+        print(f"[API] 服务器版本已设置: {valid_servers[server_version]} ({server_version})")
+    except Exception as e:
+        print(f"[API错误] 服务器版本设置失败: {e}")
+    
+    # 设置其他参数
     page = _bb_window_global.pages[0]
     api_set_run_times(page, run_count)
     api_set_apple_type(page, apple_type)
