@@ -208,9 +208,13 @@ def start_tcp_server(bb_window, port=25001):
             
             # 弹窗关闭通知功能已移除
             
-            # 免责声明关闭后，导入模块
+            # 免责声明关闭后，导入模块并设置服务器版本
             if "免责声明" in title:
                 ensure_imports()
+                # 设置服务器版本（如果提供了参数）
+                server_version = _current_task_args.get('server_version')
+                if server_version and _bb_window_global is not None:
+                    api_set_server_version(_bb_window_global, server_version)
         
         t = threading.Thread(target=monitor, daemon=True)
         t.start()
@@ -544,6 +548,44 @@ def api_set_battle_type(page, battle_type):
         page.battletype.set(CT.BATTLE_TYPE[1])
         print("[API] 战斗类型: 单次")
 
+def api_set_server_version(bb, server_version):
+    """设置服务器版本
+    
+    Args:
+        bb: BBchannel主窗口对象
+        server_version: 服务器版本代码 ('CH', 'CNTW', 'JP')
+    """
+    try:
+        page = bb.pages[0]
+        
+        # 验证服务器版本参数
+        valid_servers = {'CH': '简中服', 'CNTW': '繁中服', 'JP': '日语服'}
+        if server_version not in valid_servers:
+            print(f"[API警告] 无效的服务器版本: {server_version}，使用默认值 CH")
+            server_version = 'CH'
+        
+        # 设置页面服务器版本
+        page.SS['server'] = server_version
+        
+        # 更新UI显示（如果存在）
+        if hasattr(page, 'server') and hasattr(page.server, 'set'):
+            page.server.set(valid_servers[server_version])
+        
+        # 刷新页面标签显示
+        if hasattr(bb, 'pagebar') and hasattr(bb.pagebar, 'tags'):
+            try:
+                bb.pagebar.tags[page.idx].createText(True)
+            except Exception as e:
+                print(f"[API警告] 页面标签更新失败: {e}")
+        
+        print(f"[API] 服务器版本已设置: {valid_servers[server_version]} ({server_version})")
+        return True
+    except Exception as e:
+        print(f"[API错误] 服务器版本设置失败: {e}")
+        import traceback
+        traceback.print_exc()
+        return False
+
 def api_load_config(bb, filename):
     """加载队伍配置文件（从第4步开始：直接应用配置）"""
     import os
@@ -710,6 +752,7 @@ def api_run_bbc_task(args):
     connect = args.get('connect', 'auto')
     support_order_mismatch = args.get('support_order_mismatch', False)
     team_config_error = args.get('team_config_error', False)
+    server_version = args.get('server_version', 'CH')  # 默认简中服
     mumu_path = args.get('mumu_path', '')
     mumu_index = args.get('mumu_index', 0)
     ld_path = args.get('ld_path', '')
@@ -719,7 +762,8 @@ def api_run_bbc_task(args):
     # 保存参数到全局变量，供弹窗处理使用
     _current_task_args = {
         'support_order_mismatch': support_order_mismatch,
-        'team_config_error': team_config_error
+        'team_config_error': team_config_error,
+        'server_version': server_version
     }
     
     # 等待免责声明关闭（自动处理，等待足够时间）
