@@ -42,6 +42,7 @@ _popup_wait_dict = {}
 _popup_wait_lock = None
 
 TCP_PORT = 25001
+CALLBACK_PORT = 25002
 
 # ==================== BBC 窗口注册 ====================
 
@@ -738,7 +739,6 @@ class BBCServer:
 _tcp_server_instance = None
 
 def start_tcp_server(bb_window, port=25001):
-    import socket
     import threading
     import queue
     from tkinter import messagebox
@@ -804,6 +804,33 @@ def start_tcp_server(bb_window, port=25001):
                 'message': fix_encoding(message)
             }
             popup_event_queue.put(popup_data)
+            
+            # 立即发送弹窗通知到回调端口
+            if CALLBACK_PORT:
+                def send_popup_notification():
+                    import socket
+                    import json
+                    import time
+                    time.sleep(0.2)
+                    try:
+                        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                        s.settimeout(5)
+                        s.connect(('127.0.0.1', CALLBACK_PORT))
+                        msg = {
+                            'event': 'popup_appeared',
+                            'popup_id': popup_id,
+                            'popup_title': fix_encoding(title),
+                            'popup_message': fix_encoding(message),
+                            'popup_type': func_name
+                        }
+                        data = json.dumps(msg, ensure_ascii=False).encode('utf-8')
+                        s.sendall(len(data).to_bytes(4, 'big') + data)
+                        s.close()
+                        _log('info', f'[Callback] Popup appeared notified: {title}')
+                    except Exception as e:
+                        _log('warning', f'[Callback] Failed to notify popup appeared: {e}')
+                threading.Thread(target=send_popup_notification, daemon=True).start()
+            
             if '免责声明' in title:
                 def auto_disclaimer():
                     time.sleep(2)
@@ -819,6 +846,10 @@ def start_tcp_server(bb_window, port=25001):
         WM_CLOSE = 0x0010
         popup_data = {'value': None, 'resolved': False}
 
+        def is_window_exists(window_title):
+            hwnd = user32.FindWindowW(None, window_title)
+            return hwnd != 0
+
         def monitor():
             while not popup_data['resolved']:
                 with _popup_wait_lock:
@@ -826,19 +857,48 @@ def start_tcp_server(bb_window, port=25001):
                     if info and info.get('status') == 'resolved':
                         popup_data['value'] = info.get('result')
                         popup_data['resolved'] = True
-                        hwnd = user32.FindWindowW(None, title)
-                        if hwnd:
-                            user32.PostMessageW(hwnd, WM_CLOSE, 0, 0)
+                        if is_window_exists(title):
+                            hwnd = user32.FindWindowW(None, title)
+                            if hwnd:
+                                user32.PostMessageW(hwnd, WM_CLOSE, 0, 0)
                         break
                 time.sleep(0.1)
+
+            time.sleep(2)
+
             for _ in range(30):
-                hwnd = user32.FindWindowW(None, title)
-                if not hwnd:
+                if not is_window_exists(title):
                     break
                 time.sleep(0.1)
+
             _remove_popup_from_queue(popup_id)
-            if "免责声明" in title:
-                ensure_imports()
+
+            if CALLBACK_PORT:
+                def send_callback():
+                    import socket
+                    import json
+                    time.sleep(0.5)
+                    try:
+                        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                        s.settimeout(5)
+                        s.connect(('127.0.0.1', CALLBACK_PORT))
+                        msg = {
+                            'event': 'popup_closed',
+                            'popup_id': popup_id,
+                            'popup_title': title,
+                            'popup_result': popup_data.get('value'),
+                            'window_closed': not is_window_exists(title)
+                        }
+                        if "免责声明" in title:
+                            msg['event'] = 'disclaimer_closed'
+                            msg['bbc_ready'] = True
+                        data = json.dumps(msg, ensure_ascii=False).encode('utf-8')
+                        s.sendall(len(data).to_bytes(4, 'big') + data)
+                        s.close()
+                        _log('info', f'[Callback] Popup "{title}" closed, notified port {CALLBACK_PORT}')
+                    except Exception as e:
+                        _log('warning', f'[Callback] Failed to notify: {e}')
+                threading.Thread(target=send_callback, daemon=True).start()
 
         t = threading.Thread(target=monitor, daemon=True)
         t.start()
@@ -866,3 +926,26 @@ def start_tcp_server(bb_window, port=25001):
     _tcp_server_instance = BBCServer(port)
     threading.Thread(target=_tcp_server_instance.start, daemon=True).start()
     _log('info', '[Server] TCP Server thread started')
+
+    if CALLBACK_PORT:
+        def send_callback():
+            import socket
+            import json
+            import time
+            time.sleep(0.5)
+            try:
+                s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                s.settimeout(5)
+                s.connect(('127.0.0.1', CALLBACK_PORT))
+                msg = {
+                    'event': 'server_started',
+                    'server_port': port,
+                    'bbc_ready': _bb_window_global is not None
+                }
+                data = json.dumps(msg, ensure_ascii=False).encode('utf-8')
+                s.sendall(len(data).to_bytes(4, 'big') + data)
+                s.close()
+                _log('info', f'[Callback] Notified port {CALLBACK_PORT}')
+            except Exception as e:
+                _log('warning', f'[Callback] Failed to notify port {CALLBACK_PORT}: {e}')
+        threading.Thread(target=send_callback, daemon=True).start()
