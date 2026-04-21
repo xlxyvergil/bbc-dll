@@ -244,10 +244,44 @@ class ConnectionAPI:
             device_type = type(page.device).__name__
             serialno_str = str(getattr(page.device, 'serialno', ''))
 
+            # 获取模拟器连接参数（从实际设备对象获取）
+            emulator_params = {}
+            actual_device = getattr(page.device, 'snapshotDevice', None)
+            if not actual_device:
+                actual_device = getattr(page.device, 'operateDevice', None)
+            if not actual_device:
+                actual_device = page.device
+            
+            actual_device_type = type(actual_device).__name__ if actual_device else device_type
+            
+            if actual_device_type == 'Mumudevice':
+                emulator_params = {
+                    'mumu_path': getattr(actual_device, 'mumuPath', ''),
+                    'emulator_index': getattr(actual_device, 'emulatorIndex', 0),
+                    'app_index': getattr(actual_device, 'appIndex', 0),
+                    'pkg': getattr(actual_device, 'pkg', '')
+                }
+            elif actual_device_type == 'LDdevice':
+                emulator_params = {
+                    'ld_path': getattr(actual_device, 'ldPath', ''),
+                    'emulator_index': getattr(actual_device, 'emulatorIndex', 0)
+                }
+            elif actual_device_type == 'Android':
+                # ADB 连接，从 serialno 解析 IP
+                import json
+                try:
+                    serialno_data = json.loads(serialno_str) if serialno_str else {}
+                    emulator_params = {
+                        'ip': serialno_data.get('host', '') if isinstance(serialno_data, dict) else serialno_str
+                    }
+                except:
+                    emulator_params = {'ip': serialno_str}
+
             device_info = {
                 'serialno': serialno_str,
                 'running': device_running,
-                'task_name': task_name
+                'task_name': task_name,
+                'emulator_params': emulator_params
             }
 
             try:
@@ -573,6 +607,43 @@ class StatusAPI:
             time.sleep(0.5)
         return {'success': True, 'has_popup': False}
 
+    @staticmethod
+    def get_ui_status():
+        """获取UI状态信息（包括topLabel提示文本）"""
+        page = get_bb_page()
+        if page is None:
+            return {
+                'success': True,
+                'top_label': '',
+                'device_running': False,
+                'battle_running': False
+            }
+        try:
+            # 获取topLabel文本
+            top_label_text = ''
+            if hasattr(page, 'topLabel'):
+                try:
+                    top_label_text = page.topLabel.cget('text')
+                except:
+                    pass
+            
+            device_running = bool(getattr(page.device, 'running', False))
+            
+            return {
+                'success': True,
+                'top_label': top_label_text,
+                'device_running': device_running,
+                'battle_running': device_running  # BBC中device.running即表示战斗运行中
+            }
+        except Exception as e:
+            return {
+                'success': True,
+                'top_label': '',
+                'device_running': False,
+                'battle_running': False,
+                'error': str(e)
+            }
+
 
 # ==================== 命令分发器 ====================
 
@@ -595,6 +666,7 @@ class CommandDispatcher:
         'pause_battle': BattleControlAPI.pause_battle,
         'resume_battle': BattleControlAPI.resume_battle,
         'get_status': StatusAPI.get_status,
+        'get_ui_status': StatusAPI.get_ui_status,
         'get_popups': StatusAPI.get_popups,
         'popup_response': StatusAPI.popup_response,
         'wait_for_popup': StatusAPI.wait_for_popup,
@@ -805,19 +877,19 @@ def start_tcp_server(bb_window, port=25001):
             }
             popup_event_queue.put(popup_data)
             
-            # 立即发送弹窗通知到回调端口
-            if CALLBACK_PORT:
+            # 非免责声明的弹窗立即推送通知（免责声明会自动关闭，走popup_closed流程）
+            if CALLBACK_PORT and '免责声明' not in title:
                 def send_popup_notification():
                     import socket
                     import json
                     import time
-                    time.sleep(0.2)
+                    time.sleep(0.3)  # 短暂延迟确保弹窗已创建
                     try:
                         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                         s.settimeout(5)
                         s.connect(('127.0.0.1', CALLBACK_PORT))
                         msg = {
-                            'event': 'popup_appeared',
+                            'event': 'popup_show',
                             'popup_id': popup_id,
                             'popup_title': fix_encoding(title),
                             'popup_message': fix_encoding(message),
@@ -826,16 +898,25 @@ def start_tcp_server(bb_window, port=25001):
                         data = json.dumps(msg, ensure_ascii=False).encode('utf-8')
                         s.sendall(len(data).to_bytes(4, 'big') + data)
                         s.close()
-                        _log('info', f'[Callback] Popup appeared notified: {title}')
+                        _log('info', f'[Callback] Popup "{title}" shown, notified port {CALLBACK_PORT}')
                     except Exception as e:
-                        _log('warning', f'[Callback] Failed to notify popup appeared: {e}')
+                        _log('warning', f'[Callback] Failed to notify popup: {e}')
                 threading.Thread(target=send_popup_notification, daemon=True).start()
             
+            # 免责声明自动关闭
             if '免责声明' in title:
                 def auto_disclaimer():
                     time.sleep(2)
                     _resolve_popup(popup_id, 'ok')
                 threading.Thread(target=auto_disclaimer, daemon=True).start()
+            
+            # showwarning/showerror/showinfo 单按钮弹窗延迟1秒自动关闭
+            if func_name in ['showinfo', 'showwarning', 'showerror']:
+                def auto_close_single_button():
+                    time.sleep(1)
+                    _resolve_popup(popup_id, 'ok')
+                threading.Thread(target=auto_close_single_button, daemon=True).start()
+            
             return _create_controlled_dialog(func_name, title, message, popup_id, original_func, **kwargs)
         return wrapper
 
@@ -903,17 +984,17 @@ def start_tcp_server(bb_window, port=25001):
         t = threading.Thread(target=monitor, daemon=True)
         t.start()
         original_func(title, message, **kwargs)
-        t.join(timeout=1)
+        t.join(timeout=5)  
         with _popup_wait_lock:
             _popup_wait_dict.pop(popup_id, None)
         _remove_popup_from_queue(popup_id)
         result = popup_data['value'] if popup_data['resolved'] else None
         if func_name == 'askyesno':
-            return result == 'yes'
+            return result == True  # BBC askyesno 返回 True/False 布尔值
         elif func_name == 'askokcancel':
-            return result == 'ok'
+            return result == True  # BBC askokcancel 返回 True/False 布尔值
         elif func_name == 'askretrycancel':
-            return result == 'retry'
+            return result == True
         return None
 
     messagebox.showinfo = create_popup_wrapper('showinfo', original_messagebox['showinfo'])
