@@ -1,196 +1,151 @@
 /*
- * BBchannel TCP Server Loader - DLL 劫持版本
- * 劫持 _ctypes.pyd，在加载时自动执行 Python 代码导入 bbc_tcp_server
+ * _ctypes.pyd 代理 DLL
+ *
+ * 编译 (MinGW-w64, Python 3.6):
+ *   gcc -shared -o _ctypes.pyd proxy_ctypes.c -L<python_dir>/libs -lpython36 -O2
+ *
+ * 或者不链接 python36.lib，运行时动态获取（推荐，更通用）:
+ *   gcc -shared -o _ctypes.pyd proxy_ctypes.c -O2
+ *
+ * 用法:
+ *   1. 将原版 _ctypes.pyd 重命名为 _ctypes_orig.pyd
+ *   2. 将编译出的 _ctypes.pyd 放到同目录
+ *   3. 将 bbc_tcp_server.py 放到同目录
  */
 
 #include <windows.h>
 #include <stdio.h>
-#include <time.h>
 
-// 原始模块句柄
-static HMODULE hOriginal = NULL;
+/* ---- Python C API 类型定义（避免依赖 Python.h） ---- */
+typedef void* PyObject;
+typedef PyObject* (*PyInit_Func)(void);
+typedef PyObject* (*PyImport_ImportModule_Func)(const char*);
+typedef int (*PyRun_SimpleString_Func)(const char*);
+typedef void (*Py_DecRef_Func)(PyObject*);
 
-// 原始模块导出函数类型
-// 使用 void* 代替 PyObject* 避免包含 Python.h
-typedef void* (*PyInitFunc)(void);
-static PyInitFunc original_PyInit__ctypes = NULL;
+/* ---- 全局状态 ---- */
+static HMODULE hOriginal = NULL;          /* 原版 _ctypes_orig.pyd 句柄 */
+static PyInit_Func original_PyInit = NULL; /* 原版 PyInit__ctypes 函数 */
 
-// 初始化 Python，导入 bbc_tcp_server
-void InitPython() {
-    // 获取 DLL 所在目录
-    wchar_t dllPath[MAX_PATH];
-    HMODULE hDll = NULL;
-    GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-                       (LPCWSTR)InitPython, &hDll);
-    GetModuleFileNameW(hDll, dllPath, MAX_PATH);
-    
-    // 移除文件名，保留目录
-    wchar_t* lastBackslash = wcsrchr(dllPath, L'\\');
-    if (lastBackslash) {
-        *lastBackslash = L'\0';
-    }
-    
-    // 延迟初始化，等待 PyInstaller 完全启动
-    // PyInstaller 需要时间来设置 sys._MEIPASS 和初始化 Python
-    Sleep(500); // 等待 500ms，确保 Python 环境就绪
-    
-    // 再检查一次，如果 Python 仍未初始化，再等待
-    for (int i = 0; i < 10; i++) {
-        HMODULE hPythonTest = GetModuleHandleW(L"python36.dll");
-        if (hPythonTest) {
-            break;
-        }
-        Sleep(200);
-    }
-    
-    // 使用 DLL 所在目录构建 bbc_tcp_server.py 路径
-    wchar_t scriptPath[MAX_PATH];
-    wcscpy_s(scriptPath, MAX_PATH, dllPath);
-    wcscat_s(scriptPath, MAX_PATH, L"\\bbc_tcp_server.py");
-    
-    // 检查文件是否存在
-    if (GetFileAttributesW(scriptPath) == INVALID_FILE_ATTRIBUTES) {
-        return;
-    }
-    
-    // 获取已加载的 Python36.dll（PyInstaller 应该已经加载）
-    HMODULE hPython = GetModuleHandleW(L"python36.dll");
+/* ---- 要注入执行的 Python 代码 ---- */
+/*
+ * 修复 import lock 竞争问题：
+ * 后台线程不在启动时立即 import bbc_tcp_server，
+ * 而是先通过 gc.get_objects() 等待 BBchannelWindow 出现，
+ * 确认主线程已完成所有关键 import 后再加载 bbc_tcp_server。
+ */
+static const char* inject_code =
+    "import threading\n"
+    "\n"
+    "def _wait_and_start():\n"
+    "    import time, gc\n"
+    "    try:\n"
+    "        for _ in range(200):\n"
+    "            for obj in gc.get_objects():\n"
+    "                if obj.__class__.__name__ == 'BBchannelWindow':\n"
+    "                    import bbc_tcp_server\n"
+    "                    bbc_tcp_server.start_tcp_server(obj, 25001)\n"
+    "                    print('[BBC-TCP] BBchannelWindow found and connected')\n"
+    "                    return\n"
+    "            time.sleep(0.05)\n"
+    "        print('[BBC-TCP] Warning: BBchannelWindow not found after 10s')\n"
+    "    except Exception as e:\n"
+    "        print(f'[BBC-TCP] Error: {e}')\n"
+    "        import traceback\n"
+    "        traceback.print_exc()\n"
+    "\n"
+    "threading.Thread(target=_wait_and_start, daemon=True).start()\n"
+    "print('[BBC-TCP] Server thread started')\n";
+
+/* ---- 注入逻辑 ---- */
+static int injected = 0;
+
+static void do_inject(void) {
+    if (injected) return;
+    injected = 1;
+
+    /* 从已加载的 python36.dll 获取 API（BBchannel 进程中必然已加载） */
+    HMODULE hPython = GetModuleHandleA("python36.dll");
     if (!hPython) {
-        // 如果还没加载，尝试从 EXE 所在目录加载
-        wchar_t exePath[MAX_PATH];
-        GetModuleFileNameW(NULL, exePath, MAX_PATH);
-        wchar_t* lastBackslash = wcsrchr(exePath, L'\\');
-        if (lastBackslash) {
-            *lastBackslash = L'\0';
-        }
-        
-        wchar_t pythonDllPath[MAX_PATH];
-        wcscpy_s(pythonDllPath, MAX_PATH, exePath);
-        wcscat_s(pythonDllPath, MAX_PATH, L"\\python36.dll");
-        
-        hPython = LoadLibraryW(pythonDllPath);
-        if (!hPython) {
-            // 最后尝试从 DLL 所在目录加载
-            hPython = LoadLibraryW(L"python36.dll");
-        }
+        /* 尝试其他版本名 */
+        hPython = GetModuleHandleA("python37.dll");
     }
-    
     if (!hPython) {
+        fprintf(stderr, "[proxy] Cannot find python DLL\n");
         return;
     }
-    
-    // 获取 Python API
-    typedef void (*Py_InitializeFunc)(void);
-    typedef int (*Py_IsInitializedFunc)(void);
-    typedef void (*Py_SetPythonHomeFunc)(const wchar_t*);
-    typedef int (*PyRun_SimpleStringFunc)(const char*);
-    typedef void* (*PyImport_ImportModuleFunc)(const char*);
-    typedef void* (*PyGILState_EnsureFunc)(void);
-    typedef void (*PyGILState_ReleaseFunc)(void*);
-    
-    Py_InitializeFunc Py_Initialize = (Py_InitializeFunc)GetProcAddress(hPython, "Py_Initialize");
-    Py_IsInitializedFunc Py_IsInitialized = (Py_IsInitializedFunc)GetProcAddress(hPython, "Py_IsInitialized");
-    Py_SetPythonHomeFunc Py_SetPythonHome = (Py_SetPythonHomeFunc)GetProcAddress(hPython, "Py_SetPythonHome");
-    PyRun_SimpleStringFunc PyRun_SimpleString = (PyRun_SimpleStringFunc)GetProcAddress(hPython, "PyRun_SimpleString");
-    PyImport_ImportModuleFunc PyImport_ImportModule = (PyImport_ImportModuleFunc)GetProcAddress(hPython, "PyImport_ImportModule");
-    PyGILState_EnsureFunc PyGILState_Ensure = (PyGILState_EnsureFunc)GetProcAddress(hPython, "PyGILState_Ensure");
-    PyGILState_ReleaseFunc PyGILState_Release = (PyGILState_ReleaseFunc)GetProcAddress(hPython, "PyGILState_Release");
-    
-    if (!PyRun_SimpleString) {
+
+    PyRun_SimpleString_Func pyRun =
+        (PyRun_SimpleString_Func)GetProcAddress(hPython, "PyRun_SimpleString");
+    if (!pyRun) {
+        fprintf(stderr, "[proxy] Cannot find PyRun_SimpleString\n");
         return;
     }
-    
-    // 获取 GIL
-    void* gil_state = NULL;
-    if (PyGILState_Ensure) {
-        gil_state = PyGILState_Ensure();
-    }
-    
-    const char* server_code = 
-        "import sys\n"
-        "import threading\n"
-        "import time\n"
-        "import gc\n"
-        "\n"
-        "bbc_tcp_bb_window = None\n"
-        "\n"
-        "def _wait_and_start():\n"
-        "    '''等待 BBchannelWindow 创建后启动 TCP Server'''\n"
-        "    try:\n"
-        "        # 立即启动 TCP Server（在免责声明弹窗之前）\n"
-        "        import bbc_tcp_server\n"
-        "        bbc_tcp_server.start_tcp_server(None, 25001)\n"
-        "        print('[BBC-TCP] Server started early')\n"
-        "        \n"
-        "        # 等待 BBchannelWindow 实例创建\n"
-        "        for _ in range(200):\n"
-        "            for obj in gc.get_objects():\n"
-        "                if obj.__class__.__name__ == 'BBchannelWindow':\n"
-        "                    global bbc_tcp_bb_window\n"
-        "                    bbc_tcp_bb_window = obj\n"
-        "                    # 更新 bbc_tcp_server 中的 bb_window\n"
-        "                    bbc_tcp_server.update_bb_window(obj)\n"
-        "                    print('[BBC-TCP] BBchannelWindow found and connected')\n"
-        "                    return\n"
-        "            __import__('time').sleep(0.05)\n"
-        "        print('[BBC-TCP] Warning: BBchannelWindow not found')\n"
-        "    except Exception as e:\n"
-        "        print(f'[BBC-TCP] Error: {e}')\n"
-        "        import traceback\n"
-        "        traceback.print_exc()\n"
-        "\n"
-        "t = threading.Thread(target=_wait_and_start, daemon=True)\n"
-        "t.start()\n"
-        "print('[BBC-TCP] Server thread started')\n";
-    
-    PyRun_SimpleString(server_code);
-    
-    // 释放 GIL
-    if (PyGILState_Release && gil_state) {
-        PyGILState_Release(gil_state);
-    }
+
+    pyRun(inject_code);
 }
 
-// Python 模块导出函数 - 转发到原始模块
-extern "C" __declspec(dllexport)
-void* PyInit__ctypes(void) {
-    if (original_PyInit__ctypes) {
-        return original_PyInit__ctypes();
-    }
-    return NULL;
-}
+/* ---- 导出: PyInit__ctypes ---- */
+/*
+ * Python import 机制调用此函数初始化 _ctypes 模块。
+ * 我们先执行注入代码，再转发给原版。
+ */
+__declspec(dllexport)
+PyObject* PyInit__ctypes(void) {
+    /* 加载原版 */
+    if (!hOriginal) {
+        /* 获取自身所在目录 */
+        char path[MAX_PATH];
+        HMODULE hSelf;
+        GetModuleHandleExA(
+            GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+            (LPCSTR)PyInit__ctypes, &hSelf);
+        GetModuleFileNameA(hSelf, path, MAX_PATH);
 
-// DLL 入口
-BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserved) {
-    switch (ul_reason_for_call) {
-    case DLL_PROCESS_ATTACH: {
-        DisableThreadLibraryCalls(hModule);
-        
-        // 首先加载原始 _ctypes.pyd
-        wchar_t originalPath[MAX_PATH];
-        GetCurrentDirectoryW(MAX_PATH, originalPath);
-        wcscat_s(originalPath, MAX_PATH, L"\\_ctypes_orig.pyd");
-        
-        hOriginal = LoadLibraryW(originalPath);
+        /* 替换文件名为 _ctypes_orig.pyd */
+        char* lastSlash = strrchr(path, '\\');
+        if (lastSlash) {
+            strcpy(lastSlash + 1, "_ctypes_orig.pyd");
+        } else {
+            strcpy(path, "_ctypes_orig.pyd");
+        }
+
+        hOriginal = LoadLibraryA(path);
         if (!hOriginal) {
-            OutputDebugStringW(L"[BBC TCP] Failed to load original _ctypes\n");
-            break;
+            fprintf(stderr, "[proxy] Cannot load _ctypes_orig.pyd from: %s\n", path);
+            return NULL;
         }
-        
-        // 获取原始导出函数
-        original_PyInit__ctypes = (PyInitFunc)GetProcAddress(hOriginal, "PyInit__ctypes");
-        
-        // 在新线程中初始化 Python
-        HANDLE hThread = CreateThread(NULL, 0, (LPTHREAD_START_ROUTINE)InitPython, NULL, 0, NULL);
-        if (hThread) CloseHandle(hThread);
-        
-        break;
+
+        original_PyInit = (PyInit_Func)GetProcAddress(hOriginal, "PyInit__ctypes");
+        if (!original_PyInit) {
+            fprintf(stderr, "[proxy] Cannot find PyInit__ctypes in original\n");
+            return NULL;
+        }
     }
-    case DLL_PROCESS_DETACH:
-        if (hOriginal) {
-            FreeLibrary(hOriginal);
-        }
-        break;
+
+    /* 先调用原版初始化（确保 ctypes 可用） */
+    PyObject* module = original_PyInit();
+
+    /* 然后注入 */
+    do_inject();
+
+    return module;
+}
+
+/* ---- DLL 入口 ---- */
+BOOL WINAPI DllMain(HINSTANCE hinstDLL, DWORD fdwReason, LPVOID lpReserved) {
+    (void)hinstDLL;
+    (void)lpReserved;
+    switch (fdwReason) {
+        case DLL_PROCESS_ATTACH:
+            DisableThreadLibraryCalls(hinstDLL);
+            break;
+        case DLL_PROCESS_DETACH:
+            if (hOriginal) {
+                FreeLibrary(hOriginal);
+                hOriginal = NULL;
+            }
+            break;
     }
     return TRUE;
 }
